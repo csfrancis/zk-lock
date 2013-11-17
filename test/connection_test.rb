@@ -20,4 +20,19 @@ class ZKLock::ConnectionTest < Test::Unit::TestCase
       c = ZKLock::Connection.new
     end
   end
+
+  def test_connection_connect
+    @c.connect
+    sleep(0.1)
+    assert @c.connected?
+  end
+
+  def test_connection_close
+    @c.connect
+    sleep(0.1)
+    assert @c.connected?
+    @c.close
+    sleep(0.1)
+    assert @c.closed?
+  end
 end
