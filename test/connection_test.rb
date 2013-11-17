@@ -23,16 +23,16 @@ class ZKLock::ConnectionTest < Test::Unit::TestCase
 
   def test_connection_connect
     @c.connect
-    sleep(0.1)
+    sleep(0.5)
     assert @c.connected?
   end
 
   def test_connection_close
     @c.connect
-    sleep(0.1)
+    sleep(0.5)
     assert @c.connected?
     @c.close
-    sleep(0.1)
+    sleep(0.5)
     assert @c.closed?
   end
 end

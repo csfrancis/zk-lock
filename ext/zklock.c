@@ -50,10 +50,24 @@ struct zklock_command {
   enum zklock_command_type cmd;
 };
 
+static void send_zkl_command(struct connection_info *conn, struct zklock_command *cmd);
+
+static void zookeeper_watcher_fn(zhandle_t *zh, int type, int state, const char *path, void *watcherCtx) {
+  ZKL_DEBUG("zookeeper_watcher_fn %p, type=%d, state=%d, path=%s", zh, type, state, path != NULL ? path : "n/a");
+}
+
 static void connection_info_free(void *p) {
   struct connection_info *conn = (struct connection_info *) p;
 
   if (conn->initialized) {
+    if (conn->thread_state == ZKLTHREAD_RUNNING) {
+      struct zklock_command cmd;
+      ZKL_DEBUG("closing zookeeper obj %p in gc(!)", conn);
+      cmd.cmd = ZKLCMD_DISCONNECT;
+      send_zkl_command(conn, &cmd);
+      /* if the connection wasn't explicitly closed, we have to wait. tough. */
+      pthread_join(conn->tid, NULL);
+    }
     close(conn->pipefd[0]);
     close(conn->pipefd[1]);
     pthread_cond_destroy(&conn->cond);
@@ -88,13 +102,22 @@ static void send_zkl_command(struct connection_info *conn, struct zklock_command
 static void * connection_info_thread(void *p) {
   unsigned char buf[kBufSize];
   size_t buf_pos = 0;
+  int ret;
   struct connection_info *conn = (struct connection_info *) p;
+
+  conn->zk = zookeeper_init(conn->server, zookeeper_watcher_fn, kZookeeperRecvTimeout,
+    NULL, (void *) conn, 0);
+  if (conn->zk == NULL) {
+    ZKL_LOG("zookeeper_init failed: %d", errno);
+    goto exit;
+  }
+  ZKL_DEBUG("zookeeper_init initialized with handle %p", conn->zk);
 
   conn->thread_state = ZKLTHREAD_RUNNING;
 
   while (conn->thread_state != ZKLTHREAD_STOPPING) {
-    struct timeval timeout = { 0 };
-    int numfds, ret;
+    struct timeval tv = { 0 }, zk_tv = { 0 };
+    int numfds, zk_fd = -1, zk_interest = 0, zk_events = 0;
     fd_set rd, wr, er;
 
     FD_ZERO(&rd);
@@ -102,10 +125,24 @@ static void * connection_info_thread(void *p) {
     FD_ZERO(&er);
     FD_SET(conn->pipefd[0], &rd);
 
-    timeout.tv_usec = kSelectTimeout;
-    numfds = conn->pipefd[0];
+    ret = zookeeper_interest(conn->zk, &zk_fd, &zk_interest, &zk_tv);
+    if (ret != ZOK) {
+      ZKL_LOG("zookeeper_interest() failed: %d, errno: %d", ret, errno);
+      break;
+    }
 
-    ret = select(numfds + 1, &rd, &wr, &er, &timeout);
+    if (zk_interest & (ZOOKEEPER_READ | ZOOKEEPER_WRITE)) {
+      numfds = (zk_fd > conn->pipefd[0]) ? zk_fd : conn->pipefd[0];
+      if (zk_interest & ZOOKEEPER_READ) FD_SET(zk_fd, &rd);
+      if (zk_interest & ZOOKEEPER_WRITE) FD_SET(zk_fd, &wr);
+    } else {
+      numfds = conn->pipefd[0];
+    }
+
+    tv.tv_sec = 0;
+    tv.tv_usec = zk_tv.tv_usec < kSelectTimeout ? zk_tv.tv_usec : kSelectTimeout;
+
+    ret = select(numfds + 1, &rd, &wr, &er, &tv);
 
     if (ret == -1) {
       if (errno == EINTR) continue;
@@ -130,16 +167,39 @@ static void * connection_info_thread(void *p) {
         buf_pos = 0;
       }
     }
+
+    if (zk_interest & ZOOKEEPER_READ && FD_ISSET(zk_fd, &rd)) {
+      zk_events |= ZOOKEEPER_READ;
+    }
+
+    if (zk_interest & ZOOKEEPER_WRITE && FD_ISSET(zk_fd, &wr)) {
+      zk_events |= ZOOKEEPER_WRITE;
+    }
+
+    if (zk_events) {
+      ret = zookeeper_process(conn->zk, zk_events);
+      if (ret == ZOK || ret == ZNOTHING)
+        continue;
+      ZKL_DEBUG("zookeeper_process() returned: %d, handle=%p", ret, conn->zk);
+      break;
+    }
   }
 
+exit:
+  if (conn->zk) {
+    ret = zookeeper_close(conn->zk);
+    if (ret != 0) {
+      ZKL_DEBUG("zookeeper_close() returned: %d, handle=%p", ret, conn->zk);
+    }
+    conn->zk = NULL;
+  }
   conn->thread_state = ZKLTHREAD_STOPPED;
-
   ZKL_DEBUG("exiting connection_info_thread");
 }
 
 static VALUE connection_connected(VALUE self) {
   ZKL_GETCONNECTION();
-  return conn->tid != 0 ? Qtrue : Qfalse;
+  return (conn->zk != NULL && zoo_state(conn->zk) == ZOO_CONNECTED_STATE) ? Qtrue : Qfalse;
 }
 
 static VALUE connection_closed(VALUE self) {
