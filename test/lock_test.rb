@@ -16,4 +16,9 @@ class ZKLock::LockTest < Test::Unit::TestCase
   def test_create_shared_lock
     ZKLock::SharedLock.new(@c)
   end
+
+  def test_create_shared_lock_lock
+    l = ZKLock::SharedLock.new(@c)
+    l.lock :timeout => -1
+  end
 end

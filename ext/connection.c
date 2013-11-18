@@ -228,17 +228,20 @@ static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
   }
 
   if (argc == 1 && TYPE(argv[0]) == T_HASH) {
-    uint64_t ns;
     VALUE timeout_ref = rb_hash_aref(argv[0], ID2SYM(rb_intern("timeout")));
-    if (TYPE(timeout_ref) != T_FLOAT)
-      rb_raise(rb_eArgError, "timeout value must be numeric");
+    if (TYPE(timeout_ref) != T_NIL) {
+      if ((TYPE(timeout_ref) != T_FLOAT && TYPE(timeout_ref) != RUBY_T_FIXNUM)
+          || NUM2DBL(timeout_ref) <= 0) {
+        rb_raise(rb_eArgError, "timeout must be a positive numeric value");
+      }
 
-    timeout = (uint64_t) (NUM2DBL(timeout_ref) * NSEC_PER_SEC);
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ZKL_DEBUG("connect timeout: %lldns", timeout);
-    ZKL_DEBUG("current time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
-    timespec_add_ns(&ts, (uint64_t) timeout);
-    ZKL_DEBUG("will block until time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
+      timeout = (uint64_t) (NUM2DBL(timeout_ref) * NSEC_PER_SEC);
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ZKL_DEBUG("connect timeout: %lldns", timeout);
+      ZKL_DEBUG("current time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
+      timespec_add_ns(&ts, (uint64_t) timeout);
+      ZKL_DEBUG("will block until time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
+    }
   }
 
   conn->thread_state = ZKLTHREAD_STARTING;

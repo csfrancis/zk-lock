@@ -27,6 +27,12 @@ class ZKLock::ConnectionTest < Test::Unit::TestCase
     assert @c.connected?
   end
 
+  def test_connection_connect_negative_timeout
+    assert_raise ArgumentError do
+      @c.connect(:timeout => -1.0)
+    end
+  end
+
   def test_connection_close
     @c.connect
     sleep(0.5)
