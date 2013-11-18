@@ -35,6 +35,14 @@ static void lock_data_free(void *p) {
   free(lock);
 }
 
+static int zkl_lock_unlocked(struct lock_data *lock) {
+  return lock->state == ZKLOCK_STATE_UNLOCKED;
+}
+
+static int zkl_lock_locked(struct lock_data *lock) {
+  return lock->state == ZKLOCK_STATE_LOCKED;
+}
+
 static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
   struct lock_data *lock = NULL;
   enum zklock_type lock_type;
@@ -72,6 +80,10 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
   struct timespec ts = { 0 };
   ZKL_GETLOCK();
   ZKL_GETLOCKCONNECTION();
+
+  if (!zkl_lock_unlocked(lock)) {
+    rb_raise(zklock_exception_, "lock is already locked or pending");
+  }
 
   if (argc == 1 && TYPE(argv[0]) == T_HASH) {
     VALUE timeout_ref = rb_hash_aref(argv[0], ID2SYM(rb_intern("timeout")));
@@ -115,6 +127,7 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
     pthread_mutex_unlock(&conn->mutex);
   }
 
+  lock->state = ZKLOCK_STATE_STARTED_LOCK;
   lock->desired_state = ZKLOCK_STATE_LOCKED;
   cmd.cmd = ZKLCMD_LOCK;
   cmd.x.lock = lock;
@@ -136,7 +149,7 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
 
 static VALUE lock_locked(VALUE self) {
   ZKL_GETLOCK();
-  return lock->state == ZKLOCK_STATE_LOCKED ? Qtrue : Qfalse;
+  return zkl_lock_locked(lock) ? Qtrue : Qfalse;
 }
 
 void define_lock_methods(VALUE klass) {
