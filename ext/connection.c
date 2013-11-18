@@ -246,6 +246,7 @@ int zkl_wait_for_connection(struct connection_data *conn, struct timespec *ts) {
   ret = NUM2INT(rb_thread_blocking_region(wait_for_connection_worker_notification, (void *) conn,
     unblock_wait_for_connection_worker_notification, (void *) conn));
   if (rb_thread_interrupted(rb_thread_current())) {
+    pthread_mutex_unlock(&conn->mutex);
     rb_raise(rb_eInterrupt, "interrupted");
   }
 
