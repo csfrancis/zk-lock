@@ -30,6 +30,7 @@ void zkl_lock_process_lock(struct zklock_command *cmd) {
 static void lock_data_free(void *p) {
   struct lock_data *lock = (struct lock_data *) p;
   ZKL_DEBUG("freeing lock: %p", p);
+  free(lock->path);
   pthread_cond_destroy(&lock->cond);
   pthread_mutex_destroy(&lock->mutex);
   free(lock);
@@ -48,9 +49,13 @@ static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
   enum zklock_type lock_type;
   VALUE class_name;
 
-  if (argc == 0 || TYPE(argv[0]) != RUBY_T_DATA
-    || TYPE(rb_equal(rb_class_of(argv[0]), zklock_connection_class_)) != RUBY_T_TRUE) {
-    ZKL_DEBUG("lock_initialize() arg[0]: 0x%x %s", TYPE(argv[0]), RSTRING_PTR(rb_class_name(rb_class_of(argv[0]))));
+  if (argc < 2 || TYPE(argv[0]) != RUBY_T_STRING || RSTRING_LEN(argv[0]) == 0 || RSTRING_PTR(argv[0])[0] != '/') {
+    rb_raise(rb_eArgError, "lock must be initialized with a valid zookeeper path and connection");
+  }
+
+  if (TYPE(argv[1]) != RUBY_T_DATA
+    || TYPE(rb_equal(rb_class_of(argv[1]), zklock_connection_class_)) != RUBY_T_TRUE) {
+    ZKL_DEBUG("lock_initialize() arg[0]: 0x%x %s", TYPE(argv[1]), RSTRING_PTR(rb_class_name(rb_class_of(argv[1]))));
     rb_raise(rb_eArgError, "lock must be initialized with a connection");
   }
 
@@ -64,12 +69,13 @@ static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
 
   ZKL_CALLOC(lock, struct lock_data);
   lock->type = lock_type;
+  lock->path = strdup(RSTRING_PTR(argv[0]));
   pthread_mutex_init(&lock->mutex, NULL);
   pthread_cond_init(&lock->cond, NULL);
-  Data_Get_Struct(argv[0], struct connection_data, lock->conn);
+  Data_Get_Struct(argv[1], struct connection_data, lock->conn);
   lock->state = lock->desired_state = ZKLOCK_STATE_UNLOCKED;
   rb_iv_set(self, kLockIvarData, Data_Wrap_Struct(rb_cObject, NULL, lock_data_free, lock));
-  rb_iv_set(self, kLockIvarConnection, argv[0]);
+  rb_iv_set(self, kLockIvarConnection, argv[1]);
 
   return self;
 }

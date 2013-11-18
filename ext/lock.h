@@ -23,6 +23,7 @@ enum zklock_state {
 
 struct lock_data {
   enum zklock_type type;
+  char *path;
   pthread_mutex_t mutex;
   pthread_cond_t cond;
   struct connection_data *conn;

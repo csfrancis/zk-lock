@@ -4,6 +4,7 @@ require 'zklock'
 class ZKLock::LockTest < Test::Unit::TestCase
   def setup
     @server = "localhost:2181"
+    @path = "/zklock/lock"
     @c = ZKLock::Connection.new(@server)
   end
 
@@ -14,22 +15,22 @@ class ZKLock::LockTest < Test::Unit::TestCase
   end
 
   def test_create_shared_lock
-    ZKLock::SharedLock.new(@c)
+    ZKLock::SharedLock.new(@path, @c)
   end
 
   def test_shared_lock_is_unlocked
-    l = ZKLock::SharedLock.new(@c)
+    l = ZKLock::SharedLock.new(@path, @c)
     refute l.locked?
   end
 
   def test_create_shared_lock_lock
-    l = ZKLock::SharedLock.new(@c)
+    l = ZKLock::SharedLock.new(@path, @c)
     assert l.lock
     assert l.locked?
   end
 
   def test_create_shared_lock_lock_twice_raises
-    l = ZKLock::SharedLock.new(@c)
+    l = ZKLock::SharedLock.new(@path, @c)
     assert l.lock
     assert_raise ZKLock::Exception do
       assert l.lock
@@ -38,7 +39,7 @@ class ZKLock::LockTest < Test::Unit::TestCase
 
   def test_create_shared_lock_lock_invalid_server_raises
     c = ZKLock::Connection.new("localhost:21181")
-    l = ZKLock::SharedLock.new(c)
+    l = ZKLock::SharedLock.new(@path, c)
     assert_raise ZKLock::Exception do
       l.lock
     end
