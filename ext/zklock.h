@@ -23,6 +23,7 @@ struct zklock_command {
   enum zklock_command_type cmd;
 };
 
+extern VALUE zklock_connection_class_;
 extern VALUE zklock_exception_;
 extern VALUE zklock_timeout_exception_;
 extern __thread struct timespec thread_ts_;

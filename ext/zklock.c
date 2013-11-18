@@ -2,14 +2,15 @@
 
 #include "zklock.h"
 #include "connection.h"
+#include "lock.h"
 #include "logging.h"
 
 static VALUE zklock_module_ = Qnil;
-static VALUE zklock_connection_class_ = Qnil;
 static VALUE zklock_lock_class_ = Qnil;
 static VALUE zklock_shared_lock_class_ = Qnil;
 static VALUE zklock_exclusive_lock_class_ = Qnil;
 
+VALUE zklock_connection_class_ = Qnil;
 VALUE zklock_exception_ = Qnil;
 VALUE zklock_timeout_exception_ = Qnil;
 
@@ -27,6 +28,7 @@ void zkl_zookeeper_watcher(zhandle_t *zh, int type, int state, const char *path,
 
 static void define_methods(void) {
   define_connection_methods(zklock_connection_class_);
+  define_lock_methods(zklock_lock_class_);
 }
 
 void Init_zklock(void) {
