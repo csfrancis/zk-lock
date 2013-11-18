@@ -2,6 +2,7 @@
 
 #include "zklock.h"
 #include "connection.h"
+#include "lock.h"
 #include "logging.h"
 
 #include <sys/select.h>
@@ -20,6 +21,9 @@ static void zkl_connection_process_command(struct connection_data *conn, struct 
   switch(cmd->cmd) {
   case ZKLCMD_TERMINATE:
     conn->thread_state = ZKLTHREAD_STOPPING;
+    break;
+  case ZKLCMD_LOCK:
+    zkl_lock_process_lock(cmd);
     break;
   default:
     break;

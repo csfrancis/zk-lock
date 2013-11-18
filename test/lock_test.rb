@@ -17,9 +17,15 @@ class ZKLock::LockTest < Test::Unit::TestCase
     ZKLock::SharedLock.new(@c)
   end
 
+  def test_shared_lock_is_unlocked
+    l = ZKLock::SharedLock.new(@c)
+    refute l.locked?
+  end
+
   def test_create_shared_lock_lock
     l = ZKLock::SharedLock.new(@c)
-    l.lock
+    assert l.lock
+    assert l.locked?
   end
 
   def test_create_shared_lock_lock_invalid_server

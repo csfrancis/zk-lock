@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 
+#include "zklock.h"
 #include "connection.h"
 
 enum zklock_type {
@@ -28,6 +29,7 @@ struct lock_data {
   enum zklock_state desired_state;
 };
 
+void zkl_lock_process_lock(struct zklock_command *cmd);
 void define_lock_methods(VALUE klass);
 
 #endif /* __LOCK_H__ */

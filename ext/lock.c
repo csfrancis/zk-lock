@@ -6,6 +6,8 @@
 #include "logging.h"
 
 #include <errno.h>
+#include <sys/select.h>
+#include <unistd.h>
 
 static const char * kLockIvarData = "@_lock_data";
 static const char * kLockIvarConnection = "@_connection";
@@ -14,6 +16,16 @@ static const char * kLockIvarConnection = "@_connection";
   Data_Get_Struct(rb_iv_get(self, kLockIvarData), struct lock_data, lock);
 #define ZKL_GETLOCKCONNECTION() struct connection_data *conn; \
   Data_Get_Struct(rb_iv_get(self, kLockIvarConnection), struct connection_data, conn);
+
+void zkl_lock_process_lock(struct zklock_command *cmd) {
+  struct lock_data *lock = cmd->x.lock;
+  usleep(100000);
+  pthread_mutex_lock(&lock->mutex);
+  ZKL_DEBUG("setting lock flag on lock %p", lock);
+  lock->state = ZKLOCK_STATE_LOCKED;
+  pthread_cond_broadcast(&lock->cond);
+  pthread_mutex_unlock(&lock->mutex);
+}
 
 static void lock_data_free(void *p) {
   struct lock_data *lock = (struct lock_data *) p;
@@ -103,10 +115,32 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
     pthread_mutex_unlock(&conn->mutex);
   }
 
-  return Qfalse;
+  lock->desired_state = ZKLOCK_STATE_LOCKED;
+  cmd.cmd = ZKLCMD_LOCK;
+  cmd.x.lock = lock;
+  zkl_connection_send_command(conn, &cmd);
+
+  pthread_mutex_lock(&lock->mutex);
+  while (lock->state != ZKLOCK_STATE_LOCKED) {
+    int ret = zkl_wait_for_notification(&lock->mutex, &lock->cond, &ts);
+    if (ret == ETIMEDOUT && lock->state != ZKLOCK_STATE_LOCKED) {
+      pthread_mutex_unlock(&conn->mutex);
+      /* todo: if we were blocking here, we need to unwatch the node */
+      rb_raise(zklock_timeout_exception_, "lock acquire timed out");
+    }
+  }
+  pthread_mutex_unlock(&conn->mutex);
+
+  return lock->state == ZKLOCK_STATE_LOCKED ? Qtrue : Qfalse;
+}
+
+static VALUE lock_locked(VALUE self) {
+  ZKL_GETLOCK();
+  return lock->state == ZKLOCK_STATE_LOCKED ? Qtrue : Qfalse;
 }
 
 void define_lock_methods(VALUE klass) {
   rb_define_method(klass, "initialize", lock_initialize, -1);
   rb_define_method(klass, "lock", lock_lock, -1);
+  rb_define_method(klass, "locked?", lock_locked, 0);
 }
