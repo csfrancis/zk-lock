@@ -54,4 +54,10 @@ class ZKLock::ConnectionTest < Test::Unit::TestCase
     refute c.connected?
   end
 
+  def test_connection_connect_twice_raises
+    @c.connect
+    assert_raise ZKLock::Exception do
+     @c.connect
+    end
+  end
 end

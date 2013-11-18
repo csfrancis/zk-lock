@@ -72,7 +72,7 @@ static void connection_info_free(void *p) {
   struct connection_info *conn = (struct connection_info *) p;
 
   if (conn->initialized) {
-    if (conn->thread_state == ZKLTHREAD_RUNNING) {
+    if (conn->thread_state != ZKLTHREAD_STOPPED && conn->thread_state != ZKLTHREAD_STOPPING) {
       ZKL_DEBUG("closing zookeeper obj %p in gc(!)", conn);
       send_zkl_terminate(conn);
     }
@@ -297,6 +297,10 @@ static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
   struct timespec ts;
   int err, ret;
   ZKL_GETCONNECTION();
+
+  if (conn->thread_state != ZKLTHREAD_STOPPED) {
+    rb_raise(zklock_exception_, "connection is in progress or connected");
+  }
 
   if (argc == 1 && TYPE(argv[0]) == T_HASH) {
     uint64_t ns;
