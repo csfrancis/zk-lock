@@ -35,4 +35,23 @@ class ZKLock::ConnectionTest < Test::Unit::TestCase
     sleep(0.5)
     assert @c.closed?
   end
+
+  def test_connection_close_raises_when_not_connected
+    assert_raise ZKLock::Exception do
+      @c.close
+    end
+  end
+
+  def test_connection_timeout
+    @c.connect(:timeout => 0.5)
+    assert @c.connected?
+    @c.close
+  end
+
+  def test_connection_invalid_server
+    c = ZKLock::Connection.new("localhost:21181")
+    c.connect(:timeout => 0.5)
+    refute c.connected?
+  end
+
 end

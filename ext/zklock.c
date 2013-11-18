@@ -19,14 +19,24 @@ static VALUE zklock_lock_class_ = Qnil;
 static VALUE zklock_shared_lock_class_ = Qnil;
 static VALUE zklock_exclusive_lock_class_ = Qnil;
 static VALUE zklock_exception_ = Qnil;
+static VALUE zklock_timeout_exception_ = Qnil;
+
+static __thread struct timespec thread_ts_;
 
 #define ZKL_CALLOC(ptr, type) ptr = malloc(sizeof(type)); if (ptr == NULL) rb_raise(rb_eNoMemError, "out of memory"); memset(ptr, 0, sizeof(type));
 #define ZKL_GETCONNECTION() struct connection_info * conn; Data_Get_Struct(self, struct connection_info, conn);
 
 enum zklock_thread_status {
   ZKLTHREAD_STOPPED = 0,
+  ZKLTHREAD_STARTING,
   ZKLTHREAD_RUNNING,
   ZKLTHREAD_STOPPING
+};
+
+enum zklock_command_type {
+  ZKLCMD_TERMINATE = 0,
+  ZKLCMD_LOCK,
+  ZKLCMD_UNLOCK
 };
 
 struct connection_info {
@@ -40,20 +50,22 @@ struct connection_info {
   char *server;
 };
 
-enum zklock_command_type {
-  ZKLCMD_DISCONNECT = 0,
-  ZKLCMD_LOCK,
-  ZKLCMD_UNLOCK
-};
-
 struct zklock_command {
   enum zklock_command_type cmd;
 };
 
 static void send_zkl_command(struct connection_info *conn, struct zklock_command *cmd);
 
+static void send_zkl_terminate(struct connection_info *conn);
+
 static void zookeeper_watcher_fn(zhandle_t *zh, int type, int state, const char *path, void *watcherCtx) {
+  struct connection_info *conn = (struct connection_info *) zoo_get_context(zh);
+
   ZKL_DEBUG("zookeeper_watcher_fn %p, type=%d, state=%d, path=%s", zh, type, state, path != NULL ? path : "n/a");
+
+  pthread_mutex_lock(&conn->mutex);
+  pthread_cond_broadcast(&conn->cond);
+  pthread_mutex_unlock(&conn->mutex);
 }
 
 static void connection_info_free(void *p) {
@@ -61,10 +73,10 @@ static void connection_info_free(void *p) {
 
   if (conn->initialized) {
     if (conn->thread_state == ZKLTHREAD_RUNNING) {
-      struct zklock_command cmd;
       ZKL_DEBUG("closing zookeeper obj %p in gc(!)", conn);
-      cmd.cmd = ZKLCMD_DISCONNECT;
-      send_zkl_command(conn, &cmd);
+      send_zkl_terminate(conn);
+    }
+    if (conn->thread_state != ZKLTHREAD_STOPPED) {
       /* if the connection wasn't explicitly closed, we have to wait. tough. */
       pthread_join(conn->tid, NULL);
     }
@@ -82,7 +94,7 @@ static void connection_info_free(void *p) {
 static void process_zkl_command(struct connection_info *conn, struct zklock_command *cmd) {
   ZKL_DEBUG("received zkl command: %d", cmd->cmd);
   switch(cmd->cmd) {
-  case ZKLCMD_DISCONNECT:
+  case ZKLCMD_TERMINATE:
     conn->thread_state = ZKLTHREAD_STOPPING;
     break;
   }
@@ -97,6 +109,12 @@ static void send_zkl_command(struct connection_info *conn, struct zklock_command
     ZKL_LOG("%s", buf);
     rb_raise(zklock_exception_, "%s", buf);
   }
+}
+
+static void send_zkl_terminate(struct connection_info *conn) {
+  struct zklock_command cmd;
+  cmd.cmd = ZKLCMD_TERMINATE;
+  send_zkl_command(conn, &cmd);
 }
 
 static void * connection_info_thread(void *p) {
@@ -194,6 +212,10 @@ exit:
     conn->zk = NULL;
   }
   conn->thread_state = ZKLTHREAD_STOPPED;
+  pthread_mutex_lock(&conn->mutex);
+  pthread_cond_broadcast(&conn->cond);
+  pthread_mutex_unlock(&conn->mutex);
+
   ZKL_DEBUG("exiting connection_info_thread");
 }
 
@@ -230,24 +252,99 @@ static VALUE connection_initialize(int argc, VALUE *argv, VALUE self) {
   return self;
 }
 
-static VALUE connection_connect(VALUE self) {
-  int err;
+static VALUE wait_for_worker_notification(void *p) {
+  int ret;
+  struct connection_info *conn = (struct connection_info *) p;
+
+  pthread_mutex_lock(&conn->mutex);
+  ret = pthread_cond_timedwait(&conn->cond, &conn->mutex, &thread_ts_);
+  pthread_mutex_unlock(&conn->mutex);
+
+  return INT2NUM(ret);
+}
+
+static void unblock_wait_for_worker_notification(void *p) {
+  struct connection_info *conn = (struct connection_info *) p;
+  pthread_mutex_lock(&conn->mutex);
+  pthread_cond_broadcast(&conn->cond);
+  pthread_mutex_unlock(&conn->mutex);
+}
+
+/* Taken from https://gist.github.com/BinaryPrison/1112092/ */
+#pragma GCC push_options
+#pragma GCC optimize ("O0")
+static inline uint32_t __iter_div_u64_rem(uint64_t dividend, uint32_t divisor, uint64_t *remainder)
+{
+  uint32_t ret = 0;
+  while (dividend >= divisor) {
+    dividend -= divisor;
+    ret++;
+  }
+  *remainder = dividend;
+  return ret;
+}
+#pragma GCC pop_options
+
+#define NSEC_PER_SEC  1000000000L
+static inline void timespec_add_ns(struct timespec *a, uint64_t ns)
+{
+  a->tv_sec += __iter_div_u64_rem(a->tv_nsec + ns, NSEC_PER_SEC, &ns);
+  a->tv_nsec = ns;
+}
+
+static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
+  uint64_t timeout = 0;
+  struct timespec ts;
+  int err, ret;
   ZKL_GETCONNECTION();
 
-  err = pthread_create(&conn->tid, NULL, connection_info_thread, (void *) conn);
-  if (err != 0) rb_raise(rb_eFatal, "pthread_create failed: %d", err);
+  if (argc == 1 && TYPE(argv[0]) == T_HASH) {
+    uint64_t ns;
+    VALUE timeout_ref = rb_hash_aref(argv[0], ID2SYM(rb_intern("timeout")));
+    if (TYPE(timeout_ref) != T_FLOAT)
+      rb_raise(rb_eArgError, "timeout value must be numeric");
 
-  return self;
+    timeout = (uint64_t) (NUM2DBL(timeout_ref) * NSEC_PER_SEC);
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ZKL_DEBUG("connect timeout: %lldns", timeout);
+    ZKL_DEBUG("current time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
+    timespec_add_ns(&ts, (uint64_t) timeout);
+    ZKL_DEBUG("will block until time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
+  }
+
+  conn->thread_state = ZKLTHREAD_STARTING;
+  err = pthread_create(&conn->tid, NULL, connection_info_thread, (void *) conn);
+  if (err != 0)
+    rb_raise(rb_eFatal, "pthread_create failed: %d", err);
+
+  if (timeout) {
+    while(conn->thread_state != ZKLTHREAD_STOPPED && connection_connected(self) != Qtrue) {
+      thread_ts_ = ts;
+
+      ret = NUM2INT(rb_thread_blocking_region(wait_for_worker_notification, (void *) conn,
+        unblock_wait_for_worker_notification, (void *) conn));
+
+      if (rb_thread_interrupted(rb_thread_current())) {
+        rb_raise(rb_eInterrupt, "interrupted");
+      }
+
+      if (ret == ETIMEDOUT && connection_connected(self) != Qtrue) {
+        rb_raise(zklock_timeout_exception_, "connect timed out");
+      }
+    }
+  }
+
+  return connection_connected(self);
 }
 
 static VALUE connection_close(VALUE self) {
   struct zklock_command cmd;
   ZKL_GETCONNECTION();
 
-  if (conn->tid == 0) rb_raise(zklock_exception_, "connection is not connected");
+  if (conn->thread_state != ZKLTHREAD_RUNNING)
+    rb_raise(zklock_exception_, "connection is not connected");
 
-  cmd.cmd = ZKLCMD_DISCONNECT;
-  send_zkl_command(conn, &cmd);
+  send_zkl_terminate(conn);
 
   return self;
 }
@@ -257,7 +354,7 @@ static void define_methods(void) {
   rb_define_method(zklock_connection_class_, "initialize", connection_initialize, -1);
   rb_define_method(zklock_connection_class_, "connected?", connection_connected, 0);
   rb_define_method(zklock_connection_class_, "closed?", connection_closed, 0);
-  rb_define_method(zklock_connection_class_, "connect", connection_connect, 0);
+  rb_define_method(zklock_connection_class_, "connect", connection_connect, -1);
   rb_define_method(zklock_connection_class_, "close", connection_close, 0);
 }
 
@@ -268,6 +365,7 @@ void Init_zklock(void) {
   zklock_shared_lock_class_ = rb_define_class_under(zklock_module_, "SharedLock", zklock_lock_class_);
   zklock_exclusive_lock_class_ = rb_define_class_under(zklock_module_, "ExclusiveLock", zklock_lock_class_);
   zklock_exception_ = rb_define_class_under(zklock_module_, "Exception", rb_eStandardError);
+  zklock_timeout_exception_ = rb_define_class_under(zklock_module_, "TimeoutException", zklock_exception_);
 
   define_methods();
 }
