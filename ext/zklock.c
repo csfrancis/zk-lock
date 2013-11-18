@@ -14,7 +14,11 @@ VALUE zklock_connection_class_ = Qnil;
 VALUE zklock_exception_ = Qnil;
 VALUE zklock_timeout_exception_ = Qnil;
 
-__thread struct timespec thread_ts_;
+struct notification_data {
+  pthread_mutex_t *mutex;
+  pthread_cond_t *cond;
+  struct timespec ts;
+};
 
 void zkl_zookeeper_watcher(zhandle_t *zh, int type, int state, const char *path, void *watcherCtx) {
   struct connection_data *conn = (struct connection_data *) zoo_get_context(zh);
@@ -24,6 +28,45 @@ void zkl_zookeeper_watcher(zhandle_t *zh, int type, int state, const char *path,
   pthread_mutex_lock(&conn->mutex);
   pthread_cond_broadcast(&conn->cond);
   pthread_mutex_unlock(&conn->mutex);
+}
+
+static VALUE wait_for_notification(void *p) {
+  int ret;
+  struct notification_data *data = (struct notification_data *) p;
+
+  if (data->ts.tv_sec == 0 && data->ts.tv_nsec == 0) {
+    ret = pthread_cond_wait(data->cond, data->mutex);
+  } else {
+    ret = pthread_cond_timedwait(data->cond, data->mutex, &data->ts);
+  }
+
+  return INT2NUM(ret);
+}
+
+static void unblock_wait_notification(void *p) {
+  struct notification_data *data = (struct notification_data *) p;
+  pthread_mutex_lock(data->mutex);
+  pthread_cond_broadcast(data->cond);
+  pthread_mutex_unlock(data->mutex);
+}
+
+int zkl_wait_for_notification(pthread_mutex_t *mutex, pthread_cond_t *cond, struct timespec *ts) {
+  int ret;
+  struct notification_data data = { mutex, cond };
+
+  if (ts) {
+    data.ts = *ts;
+  } else {
+    memset(&data.ts, 0, sizeof(struct timespec));
+  }
+
+  ret = NUM2INT(rb_thread_blocking_region(wait_for_notification, &data, unblock_wait_notification, &data));
+  if (rb_thread_interrupted(rb_thread_current())) {
+    pthread_mutex_unlock(mutex);
+    rb_raise(rb_eInterrupt, "interrupted");
+  }
+
+  return ret;
 }
 
 static void define_methods(void) {

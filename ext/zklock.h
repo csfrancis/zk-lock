@@ -1,8 +1,10 @@
 #ifndef __ZKLOCK_H__
 #define __ZKLOCK_H__
 
-#include <time.h>
+#include "ruby.h"
 #include "zookeeper/zookeeper.h"
+
+#include <time.h>
 
 #define ZKL_CALLOC(ptr, type) ptr = malloc(sizeof(type)); if (ptr == NULL) rb_raise(rb_eNoMemError, "out of memory"); memset(ptr, 0, sizeof(type));
 
@@ -21,14 +23,17 @@ enum zklock_command_type {
 
 struct zklock_command {
   enum zklock_command_type cmd;
+  union {
+    void *lock;
+  } x;
 };
 
 extern VALUE zklock_connection_class_;
 extern VALUE zklock_exception_;
 extern VALUE zklock_timeout_exception_;
-extern __thread struct timespec thread_ts_;
 
 void zkl_zookeeper_watcher(zhandle_t *zh, int type, int state, const char *path, void *watcherCtx);
+int zkl_wait_for_notification(pthread_mutex_t *mutex, pthread_cond_t *cond, struct timespec *ts);
 
 /* Taken from https://gist.github.com/BinaryPrison/1112092/ */
 static inline uint32_t __iter_div_u64_rem(uint64_t dividend, uint32_t divisor, uint64_t *remainder)

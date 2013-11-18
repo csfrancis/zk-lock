@@ -46,6 +46,8 @@ static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
   lock->type = lock_type;
   pthread_mutex_init(&lock->mutex, NULL);
   pthread_cond_init(&lock->cond, NULL);
+  Data_Get_Struct(argv[0], struct connection_data, lock->conn);
+  lock->state = lock->desired_state = ZKLOCK_STATE_UNLOCKED;
   rb_iv_set(self, kLockIvarData, Data_Wrap_Struct(rb_cObject, NULL, lock_data_free, lock));
   rb_iv_set(self, kLockIvarConnection, argv[0]);
 
@@ -53,9 +55,10 @@ static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
 }
 
 static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
+  struct zklock_command cmd;
   int64_t timeout = -1;
-  int ret, blocking = 0;
   struct timespec ts = { 0 };
+  ZKL_GETLOCK();
   ZKL_GETLOCKCONNECTION();
 
   if (argc == 1 && TYPE(argv[0]) == T_HASH) {
@@ -85,7 +88,7 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
     pthread_mutex_lock(&conn->mutex);
     if (!zkl_connection_connected(conn)) {
       do {
-        ret = zkl_wait_for_connection(conn, &ts);
+        int ret = zkl_wait_for_connection(conn, &ts);
         if (ret == ETIMEDOUT && !zkl_connection_connected(conn)) {
           pthread_mutex_unlock(&conn->mutex);
           rb_raise(zklock_timeout_exception_, "connect timed out");

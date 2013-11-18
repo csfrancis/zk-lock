@@ -22,7 +22,7 @@ class ZKLock::LockTest < Test::Unit::TestCase
     l.lock
   end
 
-  def test_create_shared_lock_lock
+  def test_create_shared_lock_lock_invalid_server
     c = ZKLock::Connection.new("localhost:21181")
     l = ZKLock::SharedLock.new(c)
     assert_raise ZKLock::Exception do

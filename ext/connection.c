@@ -214,43 +214,8 @@ static VALUE connection_initialize(int argc, VALUE *argv, VALUE self) {
   return self;
 }
 
-static VALUE wait_for_connection_worker_notification(void *p) {
-  int ret;
-  struct connection_data *conn = (struct connection_data *) p;
-
-  if (thread_ts_.tv_sec == 0 && thread_ts_.tv_nsec == 0) {
-    ret = pthread_cond_wait(&conn->cond, &conn->mutex);
-  } else {
-    ret = pthread_cond_timedwait(&conn->cond, &conn->mutex, &thread_ts_);
-  }
-
-  return INT2NUM(ret);
-}
-
-static void unblock_wait_for_connection_worker_notification(void *p) {
-  struct connection_data *conn = (struct connection_data *) p;
-  pthread_mutex_lock(&conn->mutex);
-  pthread_cond_broadcast(&conn->cond);
-  pthread_mutex_unlock(&conn->mutex);
-}
-
 int zkl_wait_for_connection(struct connection_data *conn, struct timespec *ts) {
-  int ret;
-
-  if (ts) {
-    thread_ts_ = *ts;
-  } else {
-    memset(&thread_ts_, 0, sizeof(struct timespec));
-  }
-
-  ret = NUM2INT(rb_thread_blocking_region(wait_for_connection_worker_notification, (void *) conn,
-    unblock_wait_for_connection_worker_notification, (void *) conn));
-  if (rb_thread_interrupted(rb_thread_current())) {
-    pthread_mutex_unlock(&conn->mutex);
-    rb_raise(rb_eInterrupt, "interrupted");
-  }
-
-  return ret;
+  return zkl_wait_for_notification(&conn->mutex, &conn->cond, ts);
 }
 
 void zkl_connection_connect(struct connection_data *conn) {
