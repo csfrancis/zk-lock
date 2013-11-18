@@ -21,10 +21,12 @@ static void zkl_connection_process_command(struct connection_data *conn, struct 
   case ZKLCMD_TERMINATE:
     conn->thread_state = ZKLTHREAD_STOPPING;
     break;
+  default:
+    break;
   }
 }
 
-static void zkl_connection_send_command(struct connection_data *conn, struct zklock_command *cmd) {
+void zkl_connection_send_command(struct connection_data *conn, struct zklock_command *cmd) {
   int ret;
   ret = write(conn->pipefd[1], (void *) cmd, sizeof(struct zklock_command));
   if (ret == -1) {
@@ -43,10 +45,11 @@ static void zkl_send_terminate(struct connection_data *conn) {
 
 static void connection_data_free(void *p) {
   struct connection_data *conn = (struct connection_data *) p;
+  ZKL_DEBUG("freeing connection: %p", p);
 
   if (conn->initialized) {
     if (conn->thread_state != ZKLTHREAD_STOPPED && conn->thread_state != ZKLTHREAD_STOPPING) {
-      ZKL_DEBUG("closing zookeeper obj %p in gc(!)", conn);
+      ZKL_DEBUG("zookeeper worker thread for %p still alive in gc(!)", conn);
       zkl_send_terminate(conn);
     }
     if (conn->thread_state != ZKLTHREAD_STOPPED) {
@@ -164,11 +167,20 @@ exit:
   pthread_mutex_unlock(&conn->mutex);
 
   ZKL_DEBUG("exiting connection_data_worker");
+  return NULL;
 }
 
 static VALUE connection_connected(VALUE self) {
   ZKL_GETCONNECTION();
-  return (conn->zk != NULL && zoo_state(conn->zk) == ZOO_CONNECTED_STATE) ? Qtrue : Qfalse;
+  return zkl_connection_connected(conn) ? Qtrue : Qfalse;
+}
+
+int zkl_connection_connected(struct connection_data *conn) {
+  return conn->zk != NULL && zoo_state(conn->zk) == ZOO_CONNECTED_STATE;
+}
+
+int zkl_connection_valid(struct connection_data *conn) {
+  return conn->thread_state == ZKLTHREAD_RUNNING || conn->thread_state == ZKLTHREAD_STARTING;
 }
 
 static VALUE connection_closed(VALUE self) {
@@ -183,13 +195,16 @@ static VALUE connection_alloc(VALUE klass) {
 }
 
 static VALUE connection_initialize(int argc, VALUE *argv, VALUE self) {
+  pthread_mutexattr_t attr;
   ZKL_GETCONNECTION();
 
   if (argc == 0 || TYPE(argv[0]) != T_STRING) rb_raise(rb_eArgError, "zookeeper server must be specified as a string");
   if (RSTRING_LEN(argv[0]) == 0) rb_raise(rb_eArgError, "server string cannot be empty");
 
   conn->server = strdup(RSTRING_PTR(argv[0]));
-  pthread_mutex_init(&conn->mutex, NULL);
+  pthread_mutexattr_init(&attr);
+  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&conn->mutex, &attr);
   pthread_cond_init(&conn->cond, NULL);
   if (pipe(conn->pipefd) == -1) rb_raise(rb_eFatal, "pipe() failed: %d", errno);
   fcntl(conn->pipefd[0], F_SETFL, fcntl(conn->pipefd[0], F_GETFL) | O_NONBLOCK);
@@ -199,28 +214,60 @@ static VALUE connection_initialize(int argc, VALUE *argv, VALUE self) {
   return self;
 }
 
-static VALUE wait_for_worker_notification(void *p) {
+static VALUE wait_for_connection_worker_notification(void *p) {
   int ret;
   struct connection_data *conn = (struct connection_data *) p;
 
-  pthread_mutex_lock(&conn->mutex);
-  ret = pthread_cond_timedwait(&conn->cond, &conn->mutex, &thread_ts_);
-  pthread_mutex_unlock(&conn->mutex);
+  if (thread_ts_.tv_sec == 0 && thread_ts_.tv_nsec == 0) {
+    ret = pthread_cond_wait(&conn->cond, &conn->mutex);
+  } else {
+    ret = pthread_cond_timedwait(&conn->cond, &conn->mutex, &thread_ts_);
+  }
 
   return INT2NUM(ret);
 }
 
-static void unblock_wait_for_worker_notification(void *p) {
+static void unblock_wait_for_connection_worker_notification(void *p) {
   struct connection_data *conn = (struct connection_data *) p;
   pthread_mutex_lock(&conn->mutex);
   pthread_cond_broadcast(&conn->cond);
   pthread_mutex_unlock(&conn->mutex);
 }
 
+int zkl_wait_for_connection(struct connection_data *conn, struct timespec *ts) {
+  int ret;
+
+  if (ts) {
+    thread_ts_ = *ts;
+  } else {
+    memset(&thread_ts_, 0, sizeof(struct timespec));
+  }
+
+  ret = NUM2INT(rb_thread_blocking_region(wait_for_connection_worker_notification, (void *) conn,
+    unblock_wait_for_connection_worker_notification, (void *) conn));
+  if (rb_thread_interrupted(rb_thread_current())) {
+    rb_raise(rb_eInterrupt, "interrupted");
+  }
+
+  return ret;
+}
+
+void zkl_connection_connect(struct connection_data *conn) {
+  int err;
+  if (conn->thread_state != ZKLTHREAD_STOPPED) {
+    rb_raise(zklock_exception_, "connection is in progress or connected");
+  }
+
+  conn->thread_state = ZKLTHREAD_STARTING;
+  err = pthread_create(&conn->tid, NULL, connection_data_worker, (void *) conn);
+  if (err != 0) {
+    rb_raise(rb_eFatal, "pthread_create failed: %d", err);
+  }
+}
+
 static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
   uint64_t timeout = 0;
   struct timespec ts;
-  int err, ret;
   ZKL_GETCONNECTION();
 
   if (conn->thread_state != ZKLTHREAD_STOPPED) {
@@ -244,33 +291,25 @@ static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
     }
   }
 
-  conn->thread_state = ZKLTHREAD_STARTING;
-  err = pthread_create(&conn->tid, NULL, connection_data_worker, (void *) conn);
-  if (err != 0)
-    rb_raise(rb_eFatal, "pthread_create failed: %d", err);
-
+  zkl_connection_connect(conn);
   if (timeout) {
-    while(conn->thread_state != ZKLTHREAD_STOPPED && connection_connected(self) != Qtrue) {
-      thread_ts_ = ts;
-
-      ret = NUM2INT(rb_thread_blocking_region(wait_for_worker_notification, (void *) conn,
-        unblock_wait_for_worker_notification, (void *) conn));
-
-      if (rb_thread_interrupted(rb_thread_current())) {
-        rb_raise(rb_eInterrupt, "interrupted");
-      }
-
-      if (ret == ETIMEDOUT && connection_connected(self) != Qtrue) {
-        rb_raise(zklock_timeout_exception_, "connect timed out");
+    pthread_mutex_lock(&conn->mutex);
+    if (!zkl_connection_connected(conn)) {
+      while(conn->thread_state != ZKLTHREAD_STOPPED && connection_connected(self) != Qtrue) {
+        int ret = zkl_wait_for_connection(conn, &ts);
+        if (ret == ETIMEDOUT && !zkl_connection_connected(conn)) {
+          pthread_mutex_unlock(&conn->mutex);
+          rb_raise(zklock_timeout_exception_, "connect timed out");
+        }
       }
     }
+    pthread_mutex_unlock(&conn->mutex);
   }
 
   return connection_connected(self);
 }
 
 static VALUE connection_close(VALUE self) {
-  struct zklock_command cmd;
   ZKL_GETCONNECTION();
 
   if (conn->thread_state != ZKLTHREAD_RUNNING)

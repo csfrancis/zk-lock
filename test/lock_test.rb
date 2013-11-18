@@ -19,6 +19,14 @@ class ZKLock::LockTest < Test::Unit::TestCase
 
   def test_create_shared_lock_lock
     l = ZKLock::SharedLock.new(@c)
-    l.lock :timeout => -1
+    l.lock
+  end
+
+  def test_create_shared_lock_lock
+    c = ZKLock::Connection.new("localhost:21181")
+    l = ZKLock::SharedLock.new(c)
+    assert_raise ZKLock::Exception do
+      l.lock
+    end
   end
 end

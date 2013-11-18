@@ -1,13 +1,19 @@
 #include "ruby.h"
 
 #include "zklock.h"
+#include "connection.h"
 #include "lock.h"
 #include "logging.h"
+
+#include <errno.h>
 
 static const char * kLockIvarData = "@_lock_data";
 static const char * kLockIvarConnection = "@_connection";
 
-#define ZKL_GETLOCK() struct lock_data * lock; Data_Get_Struct(rb_iv_get(self, kLockIvarData), struct lock_data, lock);
+#define ZKL_GETLOCK() struct lock_data *lock; \
+  Data_Get_Struct(rb_iv_get(self, kLockIvarData), struct lock_data, lock);
+#define ZKL_GETLOCKCONNECTION() struct connection_data *conn; \
+  Data_Get_Struct(rb_iv_get(self, kLockIvarConnection), struct connection_data, conn);
 
 static void lock_data_free(void *p) {
   struct lock_data *lock = (struct lock_data *) p;
@@ -47,22 +53,21 @@ static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
 }
 
 static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
-  int64_t timeout = 0;
-  int blocking = 0;
-  struct timespec ts;
+  int64_t timeout = -1;
+  int ret, blocking = 0;
+  struct timespec ts = { 0 };
+  ZKL_GETLOCKCONNECTION();
 
   if (argc == 1 && TYPE(argv[0]) == T_HASH) {
     VALUE timeout_ref = rb_hash_aref(argv[0], ID2SYM(rb_intern("timeout")));
     if (TYPE(timeout_ref) != T_NIL) {
-      if (TYPE(timeout_ref) != T_FLOAT && TYPE(timeout_ref) != RUBY_T_FIXNUM) {
-        rb_raise(rb_eArgError, "timeout value must be numeric");
+      if ((TYPE(timeout_ref) != T_FLOAT && TYPE(timeout_ref) != RUBY_T_FIXNUM)
+          || NUM2DBL(timeout_ref) == 0) {
+        rb_raise(rb_eArgError, "timeout value must be numeric and cannot be zero");
       }
 
       timeout = (int64_t) (NUM2DBL(timeout_ref) * NSEC_PER_SEC);
-      if (timeout < 0) {
-        ZKL_DEBUG("lock() will block with no timeout");
-        timeout = -1; /* blocking timeout */
-      } else if (timeout > 0) {
+      if (timeout > 0) {
         clock_gettime(CLOCK_REALTIME, &ts);
         ZKL_DEBUG("lock timeout: %lldns", timeout);
         ZKL_DEBUG("current time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
@@ -70,6 +75,29 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
         ZKL_DEBUG("will block until time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
       }
     }
+  }
+
+  if (!zkl_connection_valid(conn)) {
+    zkl_connection_connect(conn);
+  }
+
+  if (!zkl_connection_connected(conn)) {
+    pthread_mutex_lock(&conn->mutex);
+    if (!zkl_connection_connected(conn)) {
+      do {
+        ret = zkl_wait_for_connection(conn, &ts);
+        if (ret == ETIMEDOUT && !zkl_connection_connected(conn)) {
+          pthread_mutex_unlock(&conn->mutex);
+          rb_raise(zklock_timeout_exception_, "connect timed out");
+        }
+      } while (zkl_connection_valid(conn) && !zkl_connection_connected(conn));
+
+      if (!zkl_connection_valid(conn)) {
+        pthread_mutex_unlock(&conn->mutex);
+        rb_raise(zklock_exception_, "unable to connect to server");
+      }
+    }
+    pthread_mutex_unlock(&conn->mutex);
   }
 
   return Qfalse;

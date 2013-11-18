@@ -14,6 +14,12 @@ struct connection_data {
   char *server;
 };
 
+void zkl_connection_send_command(struct connection_data *conn, struct zklock_command *cmd);
+int zkl_wait_for_connection(struct connection_data *conn, struct timespec *ts);
+void zkl_connection_connect(struct connection_data *conn);
+int zkl_connection_connected(struct connection_data *conn);
+int zkl_connection_valid(struct connection_data *conn);
+
 void define_connection_methods(VALUE klass);
 
 #endif /* __CONNECTION_H__ */
