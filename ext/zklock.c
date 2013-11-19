@@ -103,7 +103,11 @@ static void define_methods(void) {
 }
 
 void Init_zklock(void) {
+#ifdef HAVE_DEBUG
   zoo_set_debug_level(ZOO_LOG_LEVEL_DEBUG);
+#else
+  zoo_set_debug_level(0);
+#endif
 
   zklock_module_ = rb_define_module("ZKLock");
   zklock_connection_class_ = rb_define_class_under(zklock_module_, "Connection", rb_cObject);
