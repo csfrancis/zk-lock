@@ -25,11 +25,9 @@ class ZKLock::LockTest < Test::Unit::TestCase
     refute l.locked?
   end
 
-  def test_unlocked_unlocked_lock_raises
+  def test_unlocked_unlocked_lock_returns_false
     l = ZKLock::SharedLock.new(@path, @c)
-    assert_raise ZKLock::Exception do
-      l.unlock
-    end
+    refute l.unlock
   end
 
   def test_create_shared_lock_lock_unlock

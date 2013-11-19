@@ -431,7 +431,7 @@ static VALUE lock_unlock(int argc, VALUE *argv, VALUE self) {
   ZKL_GETLOCK();
 
   if (lock->state != ZKLOCK_STATE_LOCKED) {
-    rb_raise(zklock_exception_, "lock is not locked");
+    return Qfalse;
   }
 
   if (argc == 1 && TYPE(argv[0]) == T_HASH) {
@@ -456,7 +456,7 @@ static VALUE lock_unlock(int argc, VALUE *argv, VALUE self) {
     pthread_mutex_unlock(&lock->mutex);
   }
 
-  return Qnil;
+  return Qtrue;
 }
 
 void define_lock_methods(VALUE klass) {
