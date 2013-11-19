@@ -7,7 +7,7 @@ module ZKLock
     raise ArgumentError unless block_given?
     c = Connection.new(server)
     c.connect(opts)
-    yield
+    yield c
   ensure
     c.close if c.connected?
   end
