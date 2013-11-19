@@ -2,6 +2,8 @@ require 'test/unit'
 require 'zklock'
 
 class ZKLock::LockTest < Test::Unit::TestCase
+  SLEEP_TIMEOUT = 0.5
+
   def setup
     @server = "localhost:2181"
     @path = "/zklock/lock"
@@ -61,5 +63,143 @@ class ZKLock::LockTest < Test::Unit::TestCase
     assert_raise ZKLock::Exception do
       l.lock
     end
+  end
+
+  def test_exclusive_lock_blocks_when_shared_locked
+    mon = Monitor.new
+    cond = mon.new_cond
+    in_shared_lock = false
+
+    Thread.new do
+      begin
+        s = ZKLock::SharedLock.new(@path, @c)
+        s.lock(:blocking => true)
+        in_shared_lock = true
+        mon.synchronize do
+          cond.signal
+        end
+        sleep(SLEEP_TIMEOUT)
+        s.unlock
+        mon.synchronize do
+          in_shared_lock = false
+          cond.signal
+        end
+      rescue Exception => e
+        puts e.inspect
+      end
+    end
+
+    mon.synchronize do
+      cond.wait
+    end
+
+    e = ZKLock::ExclusiveLock.new(@path, @c)
+    assert in_shared_lock
+    start_time = Time.now
+    e.lock(:blocking => true)
+    assert Time.now - start_time > SLEEP_TIMEOUT
+    if in_shared_lock
+      mon.synchronize do
+        break unless in_shared_lock
+        cond.wait
+      end
+    end
+    refute in_shared_lock
+    e.unlock
+  end
+
+  def test_shared_lock_blocks_when_exclusive_locked
+    mon = Monitor.new
+    cond = mon.new_cond
+    in_exclusive_lock = false
+
+    Thread.new do
+      begin
+        e = ZKLock::ExclusiveLock.new(@path, @c)
+        e.lock(:blocking => true)
+        in_exclusive_lock = true
+        mon.synchronize do
+          cond.signal
+        end
+        sleep(SLEEP_TIMEOUT)
+        e.unlock
+        mon.synchronize do
+          in_exclusive_lock = false
+          cond.signal
+        end
+      rescue Exception => e
+        puts e.inspect
+      end
+    end
+
+    mon.synchronize do
+      cond.wait
+    end
+
+    s = ZKLock::SharedLock.new(@path, @c)
+    assert in_exclusive_lock
+    start_time = Time.now
+    s.lock(:blocking => true)
+    assert Time.now - start_time > SLEEP_TIMEOUT
+    if in_exclusive_lock
+      mon.synchronize do
+        break unless in_exclusive_lock
+        cond.wait
+      end
+    end
+    refute in_exclusive_lock
+    s.unlock
+  end
+
+  def test_shared_lock_returns_false_when_exclusive_locked
+    mon = Monitor.new
+    cond = mon.new_cond
+    in_exclusive_lock = false
+
+    Thread.new do
+      begin
+        e = ZKLock::ExclusiveLock.new(@path, @c)
+        e.lock(:blocking => true)
+        in_exclusive_lock = true
+        mon.synchronize do
+          cond.signal
+        end
+        sleep(SLEEP_TIMEOUT)
+        e.unlock
+        mon.synchronize do
+          in_exclusive_lock = false
+          cond.signal
+        end
+      rescue Exception => e
+        puts e.inspect
+      end
+    end
+
+    mon.synchronize do
+      cond.wait
+    end
+
+    s = ZKLock::SharedLock.new(@path, @c)
+    assert in_exclusive_lock
+    start_time = Time.now
+    refute s.lock
+    if in_exclusive_lock
+      mon.synchronize do
+        break unless in_exclusive_lock
+        cond.wait
+      end
+    end
+    refute in_exclusive_lock
+  end
+
+  def test_connection_close_raises_with_locked_lock
+    c = ZKLock::Connection.new(@server)
+    s = ZKLock::SharedLock.new(@path, c)
+    assert s.lock(:blocking => true)
+    assert_raise ZKLock::Exception do
+      c.close
+    end
+    s.unlock(:timeout => -1)
+    c.close
   end
 end

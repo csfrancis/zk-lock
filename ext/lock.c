@@ -28,6 +28,13 @@ static inline const char * get_path_name(const char *path) {
   return strrchr(path, '/') + 1;
 }
 
+static void zkl_lock_send_command(enum zklock_command_type cmd_type, struct lock_data *lock) {
+  struct zklock_command cmd;
+  cmd.cmd = cmd_type;
+  cmd.x.lock = lock;
+  zkl_connection_send_command(lock->conn, &cmd);
+}
+
 static int zkl_lock_get_children(struct lock_data *lock) {
   char *p;
   int ret;
@@ -62,9 +69,14 @@ static void cb_zk_exists_watcher(zhandle_t *zh, int type, int state, const char 
   struct lock_data *lock = (struct lock_data *) watcherCtx;
 
   if (type == ZOO_CHANGED_EVENT || type == ZOO_DELETED_EVENT || type == ZOO_NOTWATCHING_EVENT) {
+    ZKL_DEBUG("received watcher event %d for %s", type, path);
+    if (lock->state == ZKLOCK_STATE_WATCHING) {
     ret = zkl_lock_get_children(lock);
-    if (ret != ZOK) {
-      handle_lock_error(ret, lock);
+      if (ret != ZOK) {
+        handle_lock_error(ret, lock);
+      }
+    } else {
+      ZKL_DEBUG("lock %p, state=%d is no longer interested in events", lock, lock->state);
     }
   } else if (type == ZOO_SESSION_EVENT) {
     ZKL_DEBUG("session has been lost");
@@ -107,6 +119,7 @@ static void cb_zk_get_children(int rc, const struct String_vector *strings, cons
     for (i = 0; i < strings->count; i++) {
       path_name = strings->data[i];
       seq = get_lock_sequence(path_name);
+      if (seq == lock->seq) continue;
       if (lock->type == ZKLOCK_SHARED) {
         if (strstr(path_name, "write-") == path_name && seq < lock->seq) {
           owns_lock = 0;
@@ -139,7 +152,7 @@ static void cb_zk_get_children(int rc, const struct String_vector *strings, cons
       ZKL_LOCKERROR(ZSYSTEMERROR);
     }
     strncpy(path, lock->path, path_len);
-    *(strrchr(path, '/')) = '\0';
+    *(strrchr(path, '/') + 1) = '\0';
     strcat(path, watch_node);
 
     lock->state = ZKLOCK_STATE_WATCHING;
@@ -242,6 +255,8 @@ void cb_zk_delete(int rc, const void *data) {
 
 static void zkl_cleanup_lock_node(struct lock_data *lock) {
   int ret;
+
+  zkl_connection_decr_locks(lock->conn);
 
   if (lock->state > ZKLOCK_STATE_CREATE_NODE) {
     ZKL_DEBUG("deleting lock node %s", lock->path);
@@ -357,8 +372,8 @@ static int64_t get_timeout_from_hash(VALUE hash, int allow_zero, struct timespec
 }
 
 static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
-  struct zklock_command cmd;
   struct timespec ts = { 0 };
+  enum zklock_state state;
   int blocking = 0;
   ZKL_GETLOCK();
   ZKL_GETLOCKCONNECTION();
@@ -373,7 +388,7 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
 
     blocking_ref = rb_hash_aref(argv[0], ID2SYM(rb_intern("blocking")));
     if (TYPE(blocking_ref) != T_NIL) {
-      if (TYPE(blocking_ref) != T_TRUE || TYPE(blocking_ref) != T_FALSE) {
+      if (TYPE(blocking_ref) != T_TRUE && TYPE(blocking_ref) != T_FALSE) {
         rb_raise(rb_eArgError, "blocking value must be a boolean");
       }
       blocking = TYPE(blocking_ref) == T_TRUE ? 1 : 0;
@@ -405,16 +420,14 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
 
   lock->state = ZKLOCK_STATE_CREATE_NODE;
   lock->should_block = blocking;
-  cmd.cmd = ZKLCMD_LOCK;
-  cmd.x.lock = lock;
-  zkl_connection_send_command(conn, &cmd);
+  zkl_connection_incr_locks(conn);
+  zkl_lock_send_command(ZKLCMD_LOCK, lock);
 
   pthread_mutex_lock(&lock->mutex);
   while (lock->state != ZKLOCK_STATE_LOCKED && lock->state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
     int ret = zkl_wait_for_notification(&lock->mutex, &lock->cond, &ts);
-    if (ret == ETIMEDOUT && lock->state != ZKLOCK_STATE_LOCKED && lock->state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
-      enum zklock_state state = lock->state;
-
+    state = lock->state;
+    if (ret == ETIMEDOUT && state != ZKLOCK_STATE_LOCKED && state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
       pthread_mutex_unlock(&lock->mutex);
 
       zkl_cleanup_lock_node(lock);
@@ -427,7 +440,11 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
   }
   pthread_mutex_unlock(&lock->mutex);
 
-  return lock->state == ZKLOCK_STATE_LOCKED ? Qtrue : Qfalse;
+  if (state != ZKLOCK_STATE_LOCKED) {
+    zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
+  }
+
+  return state == ZKLOCK_STATE_LOCKED ? Qtrue : Qfalse;
 }
 
 static VALUE lock_locked(VALUE self) {
@@ -436,11 +453,9 @@ static VALUE lock_locked(VALUE self) {
 }
 
 static VALUE lock_unlock(int argc, VALUE *argv, VALUE self) {
-  struct zklock_command cmd;
   int64_t timeout = 0;
   struct timespec ts = { 0 };
   ZKL_GETLOCK();
-  ZKL_GETLOCKCONNECTION();
 
   if (lock->state != ZKLOCK_STATE_LOCKED) {
     rb_raise(zklock_exception_, "lock is not locked");
@@ -450,9 +465,7 @@ static VALUE lock_unlock(int argc, VALUE *argv, VALUE self) {
     timeout = get_timeout_from_hash(argv[0], 1, &ts);
   }
 
-  cmd.cmd = ZKLCMD_UNLOCK;
-  cmd.x.lock = lock;
-  zkl_connection_send_command(conn, &cmd);
+  zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
 
   if (timeout != 0) {
     pthread_mutex_lock(&lock->mutex);

@@ -50,6 +50,18 @@ static void zkl_send_terminate(struct connection_data *conn) {
   zkl_connection_send_command(conn, &cmd);
 }
 
+void zkl_connection_incr_locks(struct connection_data *conn) {
+  pthread_mutex_lock(&conn->mutex);
+  conn->num_locks++;
+  pthread_mutex_unlock(&conn->mutex);
+}
+
+void zkl_connection_decr_locks(struct connection_data *conn) {
+  pthread_mutex_lock(&conn->mutex);
+  conn->num_locks--;
+  pthread_mutex_unlock(&conn->mutex);
+}
+
 static void connection_data_free(void *p) {
   struct connection_data *conn = (struct connection_data *) p;
   ZKL_DEBUG("freeing connection: %p", p);
@@ -285,8 +297,13 @@ static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
 static VALUE connection_close(VALUE self) {
   ZKL_GETCONNECTION();
 
-  if (conn->thread_state != ZKLTHREAD_RUNNING)
+  if (conn->thread_state != ZKLTHREAD_RUNNING) {
     rb_raise(zklock_exception_, "connection is not connected");
+  }
+
+  if (conn->num_locks > 0) {
+    rb_raise(zklock_exception_, "connection has outstanding locked locks");
+  }
 
   zkl_send_terminate(conn);
 
