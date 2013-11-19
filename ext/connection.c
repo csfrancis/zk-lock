@@ -23,7 +23,10 @@ static void zkl_connection_process_command(struct connection_data *conn, struct 
     conn->thread_state = ZKLTHREAD_STOPPING;
     break;
   case ZKLCMD_LOCK:
-    zkl_lock_process_lock(cmd);
+    zkl_lock_process_lock_command(cmd);
+    break;
+  case ZKLCMD_UNLOCK:
+    zkl_lock_process_unlock_command(cmd);
     break;
   default:
     break;

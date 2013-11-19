@@ -23,10 +23,27 @@ class ZKLock::LockTest < Test::Unit::TestCase
     refute l.locked?
   end
 
-  def test_create_shared_lock_lock
+  def test_unlocked_unlocked_lock_raises
+    l = ZKLock::SharedLock.new(@path, @c)
+    assert_raise ZKLock::Exception do
+      l.unlock
+    end
+  end
+
+  def test_create_shared_lock_lock_unlock
     l = ZKLock::SharedLock.new(@path, @c)
     assert l.lock
     assert l.locked?
+    l.unlock :timeout => -1
+    refute l.locked?
+  end
+
+  def test_create_exclusive_lock_lock_unlock
+    l = ZKLock::ExclusiveLock.new(@path, @c)
+    assert l.lock
+    assert l.locked?
+    l.unlock :timeout => -1
+    refute l.locked?
   end
 
   def test_create_shared_lock_lock_twice_raises
@@ -35,6 +52,7 @@ class ZKLock::LockTest < Test::Unit::TestCase
     assert_raise ZKLock::Exception do
       assert l.lock
     end
+    l.unlock
   end
 
   def test_create_shared_lock_lock_invalid_server_raises

@@ -18,10 +18,12 @@ void zkl_log(const char *fmt, ...) {
 
 #ifdef HAVE_DEBUG
 
-void zkl_debug(const char *fmt, ...) {
+void zkl_debug(const char *filename, int line, const char *funcname, const char *fmt, ...) {
+  char tag[256] = { 0 };
+  snprintf(tag, 256, "[ZKLock::DEBUG] %s:%d@%s:", filename, line, funcname);
   va_list ap;
   va_start(ap, fmt);
-  zkl_print_log(stderr, "[ZKLock::DEBUG]", fmt, ap);
+  zkl_print_log(stderr, tag, fmt, ap);
   va_end(ap);
 }
 

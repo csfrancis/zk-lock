@@ -6,7 +6,10 @@
 
 #include <time.h>
 
-#define ZKL_CALLOC(ptr, type) ptr = malloc(sizeof(type)); if (ptr == NULL) rb_raise(rb_eNoMemError, "out of memory"); memset(ptr, 0, sizeof(type));
+#define ZKL_CALLOC(ptr, type) ptr = (type *) malloc(sizeof(type)); \
+  if (ptr == NULL) rb_raise(rb_eNoMemError, "out of memory"); memset(ptr, 0, sizeof(type));
+#define ZKL_CALLOCB(ptr, num_bytes, type) ptr = (type) malloc(num_bytes); \
+  if (ptr == NULL) rb_raise(rb_eNoMemError, "out of memory"); memset(ptr, 0, num_bytes);
 
 enum zklock_thread_status {
   ZKLTHREAD_STOPPED = 0,

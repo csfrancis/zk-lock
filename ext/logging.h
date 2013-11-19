@@ -6,7 +6,7 @@ void zkl_log(const char *fmt, ...);
 
 #ifdef HAVE_DEBUG
 void zkl_debug(const char *fmt, ...);
-#define ZKL_DEBUG(fmt, ...) zkl_debug(fmt, ##__VA_ARGS__)
+#define ZKL_DEBUG(fmt, ...) zkl_debug(__FILE__, __LINE__, __FUNCTION__, fmt, ##__VA_ARGS__)
 #else
 #define ZKL_DEBUG(fmt, ...)
 #endif
