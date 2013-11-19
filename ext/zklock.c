@@ -20,10 +20,38 @@ struct notification_data {
   struct timespec ts;
 };
 
+int64_t get_timeout_from_hash(VALUE hash, int allow_zero, struct timespec *ts) {
+  int64_t timeout = -1;
+  VALUE timeout_ref = rb_hash_aref(hash, ID2SYM(rb_intern("timeout")));
+  if (TYPE(timeout_ref) != T_NIL) {
+    if ((TYPE(timeout_ref) != T_FLOAT && TYPE(timeout_ref) != RUBY_T_FIXNUM)) {
+      rb_raise(rb_eArgError, "timeout value must be numeric");
+    }
+
+    if (!allow_zero && NUM2DBL(timeout_ref) == 0) {
+      rb_raise(rb_eArgError, "timeout value cannot be zero");
+    }
+
+    timeout = (int64_t) (NUM2DBL(timeout_ref) * NSEC_PER_SEC);
+    if (timeout > 0) {
+      clock_gettime(CLOCK_REALTIME, ts);
+      ZKL_DEBUG("timeout: %lldns", timeout);
+      ZKL_DEBUG("current time: %lld.%09ld", ts->tv_sec, ts->tv_nsec);
+      timespec_add_ns(ts, (uint64_t) timeout);
+      ZKL_DEBUG("will block until time: %lld.%09ld", ts->tv_sec, ts->tv_nsec);
+    } else {
+      ZKL_DEBUG("will block indefinitely");
+      memset(ts, 0, sizeof(struct timespec));
+    }
+  }
+  return timeout;
+}
+
 void zkl_zookeeper_watcher(zhandle_t *zh, int type, int state, const char *path, void *watcherCtx) {
   struct connection_data *conn = (struct connection_data *) zoo_get_context(zh);
 
-  ZKL_DEBUG("zkl_zookeeper_watcher %p, type=%d, state=%d, path=%s", zh, type, state, path != NULL ? path : "n/a");
+  ZKL_DEBUG("zkl_zookeeper_watcher %p, type=%d, state=%d, path=%s, watcherCtx=%p", zh, type, state,
+            path != NULL ? path : "n/a", watcherCtx);
 
   pthread_mutex_lock(&conn->mutex);
   pthread_cond_broadcast(&conn->cond);

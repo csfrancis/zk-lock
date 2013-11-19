@@ -140,18 +140,28 @@ static void * connection_data_worker(void *p) {
     }
 
     if (FD_ISSET(conn->pipefd[0], &rd)) {
+      size_t buf_offset = 0;
       int bytes_read = read(conn->pipefd[0], buf + buf_pos, kBufSize - buf_pos);
       if (bytes_read == 0) {
         ZKL_DEBUG("EOF from read pipe - breaking out of connection_data_worker");
         break;
       }
+      ZKL_DEBUG("received %d bytes of data for conn=%p, buf_pos=%d, zklock_command_size=%d",
+        bytes_read, conn, buf_pos, sizeof(struct zklock_command));
       if (bytes_read == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
       }
       buf_pos += bytes_read;
-      if (buf_pos == sizeof(struct zklock_command)) {
-        zkl_connection_process_command(conn, (struct zklock_command *) buf);
-        buf_pos = 0;
+      /* This is kind of tricky - we need to read as many commands from the buffer as
+         we can.  When there are no more full commands, move the remaining partial commands (if any)
+         to the front of the buffer */
+      while (buf_pos >= sizeof(struct zklock_command)) {
+        zkl_connection_process_command(conn, (struct zklock_command *) ((unsigned char *) buf + buf_offset));
+        buf_pos -= sizeof(struct zklock_command);
+        buf_offset += sizeof(struct zklock_command);
+      }
+      if (buf_pos > 0) {
+        memcpy(buf, buf+buf_offset, buf_pos);
       }
     }
 
@@ -260,24 +270,11 @@ static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
   }
 
   if (argc == 1 && TYPE(argv[0]) == T_HASH) {
-    VALUE timeout_ref = rb_hash_aref(argv[0], ID2SYM(rb_intern("timeout")));
-    if (TYPE(timeout_ref) != T_NIL) {
-      if ((TYPE(timeout_ref) != T_FLOAT && TYPE(timeout_ref) != RUBY_T_FIXNUM)
-          || NUM2DBL(timeout_ref) <= 0) {
-        rb_raise(rb_eArgError, "timeout must be a positive numeric value");
-      }
-
-      timeout = (uint64_t) (NUM2DBL(timeout_ref) * NSEC_PER_SEC);
-      clock_gettime(CLOCK_REALTIME, &ts);
-      ZKL_DEBUG("connect timeout: %lldns", timeout);
-      ZKL_DEBUG("current time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
-      timespec_add_ns(&ts, (uint64_t) timeout);
-      ZKL_DEBUG("will block until time: %lld.%09ld", ts.tv_sec, ts.tv_nsec);
-    }
+    timeout = get_timeout_from_hash(argv[0], 1, &ts);
   }
 
   zkl_connection_connect(conn);
-  if (timeout) {
+  if (timeout != 0) {
     pthread_mutex_lock(&conn->mutex);
     if (!zkl_connection_connected(conn)) {
       while(conn->thread_state != ZKLTHREAD_STOPPED && connection_connected(self) != Qtrue) {
