@@ -406,7 +406,7 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
         int ret = zkl_wait_for_connection(conn, &ts);
         if (ret == ETIMEDOUT && !zkl_connection_connected(conn)) {
           pthread_mutex_unlock(&conn->mutex);
-          rb_raise(zklock_timeout_exception_, "connect timed out");
+          rb_raise(zklock_timeout_error_, "connect timed out");
         }
       } while (zkl_connection_valid(conn) && !zkl_connection_connected(conn));
 
@@ -435,7 +435,7 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
       if (state == ZKLOCK_STATE_ERROR)
         rb_raise(zklock_exception_, "error acquiring lock");
       else
-        rb_raise(zklock_timeout_exception_, "lock acquire timed out");
+        rb_raise(zklock_timeout_error_, "lock acquire timed out");
     }
   }
   pthread_mutex_unlock(&lock->mutex);
@@ -477,7 +477,7 @@ static VALUE lock_unlock(int argc, VALUE *argv, VALUE self) {
         if (lock->state == ZKLOCK_STATE_ERROR)
           rb_raise(zklock_exception_, "error unlocking lock");
         else
-          rb_raise(zklock_timeout_exception_, "lock unlock timed out");
+          rb_raise(zklock_timeout_error_, "lock unlock timed out");
       }
     }
     pthread_mutex_unlock(&lock->mutex);

@@ -33,7 +33,7 @@ struct zklock_command {
 
 extern VALUE zklock_connection_class_;
 extern VALUE zklock_exception_;
-extern VALUE zklock_timeout_exception_;
+extern VALUE zklock_timeout_error_;
 
 void zkl_zookeeper_watcher(zhandle_t *zh, int type, int state, const char *path, void *watcherCtx);
 int zkl_wait_for_notification(pthread_mutex_t *mutex, pthread_cond_t *cond, struct timespec *ts);

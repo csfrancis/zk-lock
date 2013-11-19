@@ -284,7 +284,7 @@ static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
         int ret = zkl_wait_for_connection(conn, &ts);
         if (ret == ETIMEDOUT && !zkl_connection_connected(conn)) {
           pthread_mutex_unlock(&conn->mutex);
-          rb_raise(zklock_timeout_exception_, "connect timed out");
+          rb_raise(zklock_timeout_error_, "connect timed out");
         }
       }
     }

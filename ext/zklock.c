@@ -12,7 +12,7 @@ static VALUE zklock_exclusive_lock_class_ = Qnil;
 
 VALUE zklock_connection_class_ = Qnil;
 VALUE zklock_exception_ = Qnil;
-VALUE zklock_timeout_exception_ = Qnil;
+VALUE zklock_timeout_error_ = Qnil;
 
 struct notification_data {
   pthread_mutex_t *mutex;
@@ -83,7 +83,7 @@ void Init_zklock(void) {
   zklock_shared_lock_class_ = rb_define_class_under(zklock_module_, "SharedLock", zklock_lock_class_);
   zklock_exclusive_lock_class_ = rb_define_class_under(zklock_module_, "ExclusiveLock", zklock_lock_class_);
   zklock_exception_ = rb_define_class_under(zklock_module_, "Exception", rb_eStandardError);
-  zklock_timeout_exception_ = rb_define_class_under(zklock_module_, "TimeoutException", zklock_exception_);
+  zklock_timeout_error_ = rb_define_class_under(zklock_module_, "TimeoutError", zklock_exception_);
 
   define_methods();
 }
