@@ -465,6 +465,7 @@ static VALUE lock_unlock(int argc, VALUE *argv, VALUE self) {
     timeout = get_timeout_from_hash(argv[0], 1, &ts);
   }
 
+  lock->state = ZKLOCK_STATE_UNLOCKING;
   zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
 
   if (timeout != 0) {

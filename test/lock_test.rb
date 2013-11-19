@@ -202,4 +202,21 @@ class ZKLock::LockTest < Test::Unit::TestCase
     s.unlock(:timeout => -1)
     c.close
   end
+
+  def test_with_lock_yields
+    yielded = false
+    l = ZKLock::SharedLock.new(@path, @c)
+    l.with_lock do
+      yielded = true
+    end
+    refute l.locked?
+    assert yielded
+  end
+
+  def test_with_lock_raises_with_no_block
+    l = ZKLock::SharedLock.new(@path, @c)
+    assert_raise ArgumentError do
+      l.with_lock
+    end
+  end
 end
