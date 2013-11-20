@@ -16,6 +16,14 @@ static const int kZookeeperRecvTimeout = 10000;
 static const long kSelectTimeout = 100000; /* 100ms */
 static const size_t kBufSize = 1024;
 
+static int initialized_ = 0;
+int exiting_ = 0;
+
+static void zkl_connection_finalize(VALUE data) {
+  ZKL_DEBUG("zkl_connection_finalize called");
+  exiting_ = 1;
+}
+
 static void zkl_connection_process_command(struct connection_data *conn, struct zklock_command *cmd) {
   ZKL_DEBUG("received zkl command: %d", cmd->cmd);
   switch(cmd->cmd) {
@@ -102,7 +110,7 @@ static void * connection_data_worker(void *p) {
 
   conn->thread_state = ZKLTHREAD_RUNNING;
 
-  while (conn->thread_state != ZKLTHREAD_STOPPING) {
+  while (!exiting_ && conn->thread_state != ZKLTHREAD_STOPPING) {
     struct timeval tv = { 0 }, zk_tv = { 0 };
     int numfds, zk_fd = -1, zk_interest = 0, zk_events = 0;
     fd_set rd, wr, er;
@@ -130,6 +138,7 @@ static void * connection_data_worker(void *p) {
     tv.tv_usec = zk_tv.tv_usec < kSelectTimeout ? zk_tv.tv_usec : kSelectTimeout;
 
     ret = select(numfds + 1, &rd, &wr, &er, &tv);
+    if (exiting_) break;
 
     if (ret == -1) {
       if (errno == EINTR) continue;
@@ -183,7 +192,7 @@ static void * connection_data_worker(void *p) {
   }
 
 exit:
-  if (conn->zk) {
+  if (!exiting_ && conn->zk) {
     ret = zookeeper_close(conn->zk);
     if (ret != 0) {
       ZKL_DEBUG("zookeeper_close() returned: %d, handle=%p", ret, conn->zk);
@@ -226,6 +235,11 @@ static VALUE connection_alloc(VALUE klass) {
 static VALUE connection_initialize(int argc, VALUE *argv, VALUE self) {
   pthread_mutexattr_t attr;
   ZKL_GETCONNECTION();
+
+  if (!initialized_) {
+    initialized_ = 1;
+    rb_set_end_proc(zkl_connection_finalize, 0);
+  }
 
   if (argc == 0 || TYPE(argv[0]) != T_STRING) rb_raise(rb_eArgError, "zookeeper server must be specified as a string");
   if (RSTRING_LEN(argv[0]) == 0) rb_raise(rb_eArgError, "server string cannot be empty");

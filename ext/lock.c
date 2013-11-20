@@ -52,6 +52,7 @@ static int zkl_lock_get_children(struct lock_data *lock) {
 }
 
 static void set_lock_state_and_signal(enum zklock_state state, struct lock_data *lock) {
+  if (exiting_) return;
   pthread_mutex_lock(&lock->mutex);
   ZKL_DEBUG("setting lock state %d on lock %p", state, lock);
   lock->state = state;

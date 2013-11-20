@@ -35,6 +35,8 @@ extern VALUE zklock_connection_class_;
 extern VALUE zklock_exception_;
 extern VALUE zklock_timeout_error_;
 
+extern int exiting_;
+
 int64_t get_timeout_from_hash(VALUE hash, int allow_zero, struct timespec *ts);
 
 void zkl_zookeeper_watcher(zhandle_t *zh, int type, int state, const char *path, void *watcherCtx);
