@@ -82,8 +82,15 @@ static void zkl_connection_decr_ref(struct connection_data *conn) {
       }
 
       if (conn->thread_state != ZKLTHREAD_STOPPED) {
-        /* if the connection wasn't explicitly closed, we have to wait. tough. */
-        pthread_join(conn->tid, NULL);
+        struct timespec ts = { 0 };
+        ZKL_DEBUG("waiting for worker thread to terminate...");
+        pthread_mutex_lock(&conn->mutex);
+        while (conn->thread_state != ZKLTHREAD_STOPPED) {
+          clock_gettime(CLOCK_REALTIME, &ts);
+          timespec_add_ns(&ts, 10000000L); /* 10ms */
+          zkl_wait_for_connection(conn, &ts);
+        }
+        pthread_mutex_unlock(&conn->mutex);
       }
 
       close(conn->pipefd[0]);
