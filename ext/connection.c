@@ -81,6 +81,17 @@ static void connection_data_free(void *p) {
       zkl_send_terminate(conn);
     }
     if (conn->thread_state != ZKLTHREAD_STOPPED) {
+      /* The connection will not be gc'd until all locks have also been
+         released */
+      if (conn->num_locks) {
+        struct timespec ts = { 0, 0 };
+        pthread_mutex_lock(&conn->mutex);
+        while (conn->num_locks) {
+          zkl_wait_for_connection(conn, &ts);
+        }
+        pthread_mutex_unlock(&conn->mutex);
+      }
+
       /* if the connection wasn't explicitly closed, we have to wait. tough. */
       pthread_join(conn->tid, NULL);
     }

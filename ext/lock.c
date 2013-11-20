@@ -62,6 +62,9 @@ static void set_lock_state_and_signal(enum zklock_state state, struct lock_data 
 
 static void handle_lock_error(int rc, struct lock_data *lock) {
   lock->err = rc;
+  if (lock->state >= ZKLOCK_STATE_CREATE_PATH) {
+    zkl_connection_decr_locks(lock->conn);
+  }
   set_lock_state_and_signal(ZKLOCK_STATE_ERROR, lock);
 }
 
@@ -72,7 +75,7 @@ static void cb_zk_exists_watcher(zhandle_t *zh, int type, int state, const char 
   if (type == ZOO_CHANGED_EVENT || type == ZOO_DELETED_EVENT || type == ZOO_NOTWATCHING_EVENT) {
     ZKL_DEBUG("received watcher event %d for %s", type, path);
     if (lock->state == ZKLOCK_STATE_WATCHING) {
-    ret = zkl_lock_get_children(lock);
+      ret = zkl_lock_get_children(lock);
       if (ret != ZOK) {
         handle_lock_error(ret, lock);
       }
@@ -257,15 +260,16 @@ void cb_zk_delete(int rc, const void *data) {
 static void zkl_cleanup_lock_node(struct lock_data *lock) {
   int ret;
 
-  zkl_connection_decr_locks(lock->conn);
-
   if (lock->state > ZKLOCK_STATE_CREATE_NODE) {
     ZKL_DEBUG("deleting lock node %s", lock->path);
     ret = zoo_adelete(lock->conn->zk, lock->path, -1, cb_zk_delete, lock);
     if (ret != ZOK) {
       handle_lock_error(ret, lock);
+      return;
     }
   }
+
+  zkl_connection_decr_locks(lock->conn);
 }
 
 void zkl_lock_process_lock_command(struct zklock_command *cmd) {
@@ -293,6 +297,10 @@ static void lock_data_free(void *p) {
   ZKL_DEBUG("freeing lock: %p", p);
   free(lock->path);
   if (lock->create_path) free(lock->create_path);
+  if (lock->state > ZKLOCK_STATE_UNLOCKED && lock->state != ZKLOCK_STATE_UNLOCKING) {
+    ZKL_LOG("lock %p is being gc'd before being unlocked!", lock);
+    zkl_connection_decr_locks(lock->conn);
+  }
   pthread_cond_destroy(&lock->cond);
   pthread_mutex_destroy(&lock->mutex);
   free(lock);
