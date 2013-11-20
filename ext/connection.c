@@ -67,6 +67,7 @@ void zkl_connection_incr_locks(struct connection_data *conn) {
 void zkl_connection_decr_locks(struct connection_data *conn) {
   pthread_mutex_lock(&conn->mutex);
   conn->num_locks--;
+  pthread_cond_broadcast(&conn->cond);
   pthread_mutex_unlock(&conn->mutex);
 }
 
@@ -305,12 +306,25 @@ static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
   return connection_connected(self);
 }
 
-static VALUE connection_close(VALUE self) {
+static VALUE connection_close(int argc, VALUE *argv, VALUE self) {
+  uint64_t timeout = 0;
+  struct timespec ts;
   ZKL_GETCONNECTION();
 
   if (conn->thread_state != ZKLTHREAD_RUNNING) {
     rb_raise(zklock_exception_, "connection is not connected");
   }
+
+  if (argc == 1 && TYPE(argv[0]) == T_HASH) {
+    timeout = get_timeout_from_hash(argv[0], 1, &ts);
+  }
+
+  pthread_mutex_lock(&conn->mutex);
+  while (conn->num_locks > 0 && timeout != 0) {
+    int ret = zkl_wait_for_connection(conn, &ts);
+    if (ret == ETIMEDOUT) break;
+  }
+  pthread_mutex_unlock(&conn->mutex);
 
   if (conn->num_locks > 0) {
     rb_raise(zklock_exception_, "connection has outstanding locked locks");
@@ -327,5 +341,5 @@ void define_connection_methods(VALUE klass) {
   rb_define_method(klass, "connected?", connection_connected, 0);
   rb_define_method(klass, "closed?", connection_closed, 0);
   rb_define_method(klass, "connect", connection_connect, -1);
-  rb_define_method(klass, "close", connection_close, 0);
+  rb_define_method(klass, "close", connection_close, -1);
 }

@@ -9,6 +9,6 @@ module ZKLock
     c.connect(opts)
     yield c
   ensure
-    c.close if c.connected?
+    c.close(:timeout => -1) if c.nil? == false && c.connected?
   end
 end
