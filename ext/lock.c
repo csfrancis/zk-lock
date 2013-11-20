@@ -52,7 +52,6 @@ static int zkl_lock_get_children(struct lock_data *lock) {
 }
 
 static void set_lock_state_and_signal(enum zklock_state state, struct lock_data *lock) {
-  if (exiting_) return;
   pthread_mutex_lock(&lock->mutex);
   ZKL_DEBUG("setting lock state %d on lock %p", state, lock);
   lock->state = state;
@@ -255,6 +254,7 @@ void cb_zk_delete(int rc, const void *data) {
   struct lock_data *lock = (struct lock_data *) data;
   ZKL_DEBUG("%d, data=%p", rc, data);
   set_lock_state_and_signal(ZKLOCK_STATE_UNLOCKED, lock);
+  zkl_connection_decr_locks(lock->conn);
 }
 
 static void zkl_cleanup_lock_node(struct lock_data *lock) {
@@ -268,8 +268,6 @@ static void zkl_cleanup_lock_node(struct lock_data *lock) {
       return;
     }
   }
-
-  zkl_connection_decr_locks(lock->conn);
 }
 
 void zkl_lock_process_lock_command(struct zklock_command *cmd) {

@@ -332,27 +332,14 @@ static VALUE connection_connect(int argc, VALUE *argv, VALUE self) {
 }
 
 static VALUE connection_close(int argc, VALUE *argv, VALUE self) {
-  uint64_t timeout = 0;
-  struct timespec ts;
   ZKL_GETCONNECTION();
 
   if (conn->thread_state != ZKLTHREAD_RUNNING) {
     rb_raise(zklock_exception_, "connection is not connected");
   }
 
-  if (argc == 1 && TYPE(argv[0]) == T_HASH) {
-    timeout = get_timeout_from_hash(argv[0], 1, &ts);
-  }
-
-  pthread_mutex_lock(&conn->mutex);
-  while (conn->ref_count > 1 && timeout != 0) {
-    int ret = zkl_wait_for_connection(conn, &ts);
-    if (ret == ETIMEDOUT) break;
-  }
-  pthread_mutex_unlock(&conn->mutex);
-
   if (conn->ref_count > 1) {
-    rb_raise(zklock_exception_, "connection has outstanding locked locks");
+    ZKL_LOG("WARNING: connection has outstanding locked locks");
   }
 
   zkl_send_terminate(conn);
