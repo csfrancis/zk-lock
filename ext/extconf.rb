@@ -39,8 +39,8 @@ end
 
 $includes = " -I#{HERE}/include"
 $libraries = " -L#{HERE}/lib -L#{RbConfig::CONFIG['libdir']}"
-$CFLAGS = "#{$includes} #{$libraries} #{$CFLAGS}"
-$LDFLAGS = "#{$libraries} #{$LDFLAGS}"
+$CFLAGS = "#{$includes} #{$libraries} #{$CFLAGS} -g"
+$LDFLAGS = "#{$libraries} #{$LDFLAGS} -g"
 $LIBPATH = ["#{HERE}/lib"]
 $DEFLIBPATH = []
 

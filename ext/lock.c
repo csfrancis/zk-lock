@@ -298,7 +298,8 @@ static void lock_data_free(void *p) {
   free(lock->path);
   if (lock->create_path) free(lock->create_path);
   if (lock->state > ZKLOCK_STATE_UNLOCKED && lock->state != ZKLOCK_STATE_UNLOCKING) {
-    ZKL_LOG("lock %p is being gc'd before being unlocked!", lock);
+    ZKL_LOG("lock %p (%s) in state %d is being gc'd before being unlocked!", lock,
+      lock->path, lock->state);
     zkl_connection_decr_locks(lock->conn);
   }
   pthread_cond_destroy(&lock->cond);

@@ -5,14 +5,14 @@
 
 struct connection_data {
   pthread_t tid;
+  int ref_count;
   enum zklock_thread_status thread_state;
   int initialized;
-  int num_locks;
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
   int pipefd[2];
   zhandle_t *zk;
   char *server;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
 };
 
 void zkl_connection_send_command(struct connection_data *conn, struct zklock_command *cmd);

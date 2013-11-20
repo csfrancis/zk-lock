@@ -29,11 +29,11 @@ struct lock_data {
   char *create_path;
   int64_t seq;
   int should_block;
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
   struct connection_data *conn;
   enum zklock_state state;
   int err;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
 };
 
 void zkl_lock_process_lock_command(struct zklock_command *cmd);

@@ -58,52 +58,58 @@ static void zkl_send_terminate(struct connection_data *conn) {
   zkl_connection_send_command(conn, &cmd);
 }
 
-void zkl_connection_incr_locks(struct connection_data *conn) {
+static void zkl_connection_incr_ref(struct connection_data *conn) {
   pthread_mutex_lock(&conn->mutex);
-  conn->num_locks++;
+  conn->ref_count++;
   pthread_mutex_unlock(&conn->mutex);
 }
 
-void zkl_connection_decr_locks(struct connection_data *conn) {
+static void zkl_connection_decr_ref(struct connection_data *conn) {
+  int delete = 0;
   pthread_mutex_lock(&conn->mutex);
-  conn->num_locks--;
+  if (--conn->ref_count == 0) {
+    delete = 1;
+  }
   pthread_cond_broadcast(&conn->cond);
   pthread_mutex_unlock(&conn->mutex);
+
+  if (delete) {
+    ZKL_DEBUG("connection ref_count is 0 - deleting", conn);
+    if (conn->initialized) {
+      if (conn->thread_state != ZKLTHREAD_STOPPED && conn->thread_state != ZKLTHREAD_STOPPING) {
+        ZKL_DEBUG("zookeeper worker thread for %p still alive in gc(!)", conn);
+        zkl_send_terminate(conn);
+      }
+
+      if (conn->thread_state != ZKLTHREAD_STOPPED) {
+        /* if the connection wasn't explicitly closed, we have to wait. tough. */
+        pthread_join(conn->tid, NULL);
+      }
+
+      close(conn->pipefd[0]);
+      close(conn->pipefd[1]);
+      pthread_cond_destroy(&conn->cond);
+      pthread_mutex_destroy(&conn->mutex);
+      free(conn->server);
+      conn->initialized = 0;
+    }
+
+    free(conn);
+  }
+}
+
+void zkl_connection_incr_locks(struct connection_data *conn) {
+  zkl_connection_incr_ref(conn);
+}
+
+void zkl_connection_decr_locks(struct connection_data *conn) {
+  zkl_connection_decr_ref(conn);
 }
 
 static void connection_data_free(void *p) {
   struct connection_data *conn = (struct connection_data *) p;
   ZKL_DEBUG("freeing connection: %p", p);
-
-  if (conn->initialized) {
-    if (conn->thread_state != ZKLTHREAD_STOPPED && conn->thread_state != ZKLTHREAD_STOPPING) {
-      ZKL_DEBUG("zookeeper worker thread for %p still alive in gc(!)", conn);
-      zkl_send_terminate(conn);
-    }
-    if (conn->thread_state != ZKLTHREAD_STOPPED) {
-      /* The connection will not be gc'd until all locks have also been
-         released */
-      if (conn->num_locks) {
-        struct timespec ts = { 0, 0 };
-        pthread_mutex_lock(&conn->mutex);
-        while (conn->num_locks) {
-          zkl_wait_for_connection(conn, &ts);
-        }
-        pthread_mutex_unlock(&conn->mutex);
-      }
-
-      /* if the connection wasn't explicitly closed, we have to wait. tough. */
-      pthread_join(conn->tid, NULL);
-    }
-    close(conn->pipefd[0]);
-    close(conn->pipefd[1]);
-    pthread_cond_destroy(&conn->cond);
-    pthread_mutex_destroy(&conn->mutex);
-    free(conn->server);
-    conn->initialized = 0;
-  }
-
-  free(conn);
+  zkl_connection_decr_ref(conn);
 }
 
 static void * connection_data_worker(void *p) {
@@ -241,6 +247,7 @@ static VALUE connection_closed(VALUE self) {
 static VALUE connection_alloc(VALUE klass) {
   struct connection_data *conn = NULL;
   ZKL_CALLOC(conn, struct connection_data);
+  conn->ref_count = 1;
   return Data_Wrap_Struct(klass, NULL, connection_data_free, conn);
 }
 
@@ -331,13 +338,13 @@ static VALUE connection_close(int argc, VALUE *argv, VALUE self) {
   }
 
   pthread_mutex_lock(&conn->mutex);
-  while (conn->num_locks > 0 && timeout != 0) {
+  while (conn->ref_count > 1 && timeout != 0) {
     int ret = zkl_wait_for_connection(conn, &ts);
     if (ret == ETIMEDOUT) break;
   }
   pthread_mutex_unlock(&conn->mutex);
 
-  if (conn->num_locks > 0) {
+  if (conn->ref_count > 1) {
     rb_raise(zklock_exception_, "connection has outstanding locked locks");
   }
 
