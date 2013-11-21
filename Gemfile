@@ -24,6 +24,7 @@ if RUBY_VERSION != '1.8.7' && !defined?(JRUBY_VERSION)
     gem 'guard',        :require => false
     gem 'guard-rspec',  :require => false
     gem 'guard-shell',  :require => false
+    gem 'descriptive_statistics'
   end
 end
 
