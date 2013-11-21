@@ -81,7 +81,7 @@ static void zkl_connection_decr_ref(struct connection_data *conn) {
         zkl_send_terminate(conn);
       }
 
-      if (conn->thread_state != ZKLTHREAD_STOPPED) {
+      if (conn->thread_state != ZKLTHREAD_STOPPED && !exiting_) {
         struct timespec ts = { 0 };
         ZKL_DEBUG("waiting for worker thread to terminate...");
         pthread_mutex_lock(&conn->mutex);
