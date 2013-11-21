@@ -10,6 +10,7 @@
   if (ptr == NULL) rb_raise(rb_eNoMemError, "out of memory"); memset(ptr, 0, sizeof(type));
 #define ZKL_CALLOCB(ptr, num_bytes, type) ptr = (type) malloc(num_bytes); \
   if (ptr == NULL) rb_raise(rb_eNoMemError, "out of memory"); memset(ptr, 0, num_bytes);
+#define ZKL_FREE(ptr) free(ptr); ptr = NULL;
 
 enum zklock_thread_status {
   ZKLTHREAD_STOPPED = 0,

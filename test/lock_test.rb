@@ -10,6 +10,10 @@ class ZKLock::LockTest < Test::Unit::TestCase
     @c = ZKLock::Connection.new(@server)
   end
 
+  def teardown
+    @c.close if @c.connected?
+  end
+
   def test_create_lock_fails_with_no_argument
     assert_raise ArgumentError do
       ZKLock::SharedLock.new

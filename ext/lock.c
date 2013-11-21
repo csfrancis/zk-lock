@@ -12,6 +12,10 @@
 static const char * kLockIvarData = "@_lock_data";
 static const char * kLockIvarConnection = "@_connection";
 
+#define ZKLOCK_SHARED     1
+#define ZKLOCK_EXCLUSIVE  2
+#define ZKLOCK_MASTER     4
+
 #define ZKL_GETLOCK() struct lock_data *lock; \
   Data_Get_Struct(rb_iv_get(self, kLockIvarData), struct lock_data, lock);
 #define ZKL_GETLOCKCONNECTION() struct connection_data *conn; \
@@ -30,11 +34,20 @@ static inline const char * get_path_name(const char *path) {
   return strrchr(path, '/') + 1;
 }
 
+static inline pthread_mutex_t* get_lock_mutex(struct lock_data *lock) {
+  return lock->type & ZKLOCK_MASTER ? &lock->master.mutex : lock->slave.mutex;
+}
+
+static inline pthread_cond_t* get_lock_cond(struct lock_data *lock) {
+  return lock->type & ZKLOCK_MASTER ? &lock->master.cond : lock->slave.cond;
+}
+
 static void zkl_lock_send_command(enum zklock_command_type cmd_type, struct lock_data *lock) {
   struct zklock_command cmd;
   cmd.cmd = cmd_type;
   cmd.x.lock = lock;
   zkl_lock_incr_ref(lock);
+  ZKL_DEBUG("sending %d to lock %p", cmd_type, lock);
   zkl_connection_send_command(lock->conn, &cmd);
 }
 
@@ -55,11 +68,11 @@ static int zkl_lock_get_children(struct lock_data *lock) {
 }
 
 static void set_lock_state_and_signal(enum zklock_state state, struct lock_data *lock) {
-  pthread_mutex_lock(&lock->mutex);
   ZKL_DEBUG("setting lock state %d on lock %p", state, lock);
+  pthread_mutex_lock(get_lock_mutex(lock));
   lock->state = state;
-  pthread_cond_broadcast(&lock->cond);
-  pthread_mutex_unlock(&lock->mutex);
+  pthread_cond_broadcast(get_lock_cond(lock));
+  pthread_mutex_unlock(get_lock_mutex(lock));
 }
 
 static void handle_lock_error(int rc, struct lock_data *lock) {
@@ -126,11 +139,11 @@ static void cb_zk_get_children(int rc, const struct String_vector *strings, cons
       path_name = strings->data[i];
       seq = get_lock_sequence(path_name);
       if (seq == lock->seq) continue;
-      if (lock->type == ZKLOCK_SHARED) {
+      if (lock->type & ZKLOCK_SHARED) {
         if (strstr(path_name, "write-") == path_name && seq < lock->seq) {
           owns_lock = 0;
         }
-      } else {
+      } else if (lock->type & ZKLOCK_EXCLUSIVE) {
         if (seq < lock->seq) {
           owns_lock = 0;
         }
@@ -255,9 +268,10 @@ static void cb_zk_create(int rc, const char *value, const void *data) {
 
 void cb_zk_delete(int rc, const void *data) {
   struct lock_data *lock = (struct lock_data *) data;
-  ZKL_DEBUG("%d, data=%p", rc, data);
+  ZKL_DEBUG("%d, data=%p, ref_count=%d", rc, lock, lock->ref_count);
   set_lock_state_and_signal(ZKLOCK_STATE_UNLOCKED, lock);
   zkl_connection_decr_locks(lock->conn);
+  zkl_lock_decr_ref(lock);
 }
 
 static void zkl_cleanup_lock_node(struct lock_data *lock) {
@@ -270,6 +284,7 @@ static void zkl_cleanup_lock_node(struct lock_data *lock) {
       handle_lock_error(ret, lock);
       return;
     }
+    zkl_lock_incr_ref(lock);
   } else if (lock->state > ZKLOCK_STATE_UNLOCKED) {
     lock->state = ZKLOCK_STATE_UNLOCKED;
     zkl_connection_decr_locks(lock->conn);
@@ -298,31 +313,39 @@ void zkl_lock_process_unlock_command(struct zklock_command *cmd) {
 }
 
 static void zkl_lock_incr_ref(struct lock_data *lock) {
-  pthread_mutex_lock(&lock->mutex);
+  pthread_mutex_lock(get_lock_mutex(lock));
   lock->ref_count++;
-  pthread_mutex_unlock(&lock->mutex);
+  pthread_mutex_unlock(get_lock_mutex(lock));
 }
 
 static void zkl_lock_decr_ref(struct lock_data *lock) {
   int delete = 0;
-  pthread_mutex_lock(&lock->mutex);
+  pthread_mutex_lock(get_lock_mutex(lock));
   if (--lock->ref_count == 0) {
     delete = 1;
   }
-  pthread_mutex_unlock(&lock->mutex);
+  pthread_mutex_unlock(get_lock_mutex(lock));
 
   if (delete) {
     ZKL_DEBUG("freeing lock: %p", lock);
-    free(lock->path);
-    if (lock->create_path) free(lock->create_path);
+
     if (lock->state > ZKLOCK_STATE_UNLOCKED && lock->state != ZKLOCK_STATE_UNLOCKING) {
-      ZKL_LOG("lock %p (%s) in state %d is being gc'd before being unlocked!", lock,
+      ZKL_LOG("lock %p \"%s\" in state %d is being gc'd before being unlocked!", lock,
         lock->path, lock->state);
       zkl_connection_decr_locks(lock->conn);
     }
-    pthread_cond_destroy(&lock->cond);
-    pthread_mutex_destroy(&lock->mutex);
-    free(lock);
+
+    ZKL_FREE(lock->path);
+    if (lock->create_path) {
+      ZKL_FREE(lock->create_path);
+    }
+
+    if (lock->type & ZKLOCK_MASTER) {
+      pthread_cond_destroy(get_lock_cond(lock));
+      pthread_mutex_destroy(get_lock_mutex(lock));
+    }
+
+    ZKL_FREE(lock);
   }
 }
 
@@ -343,7 +366,7 @@ static int zkl_lock_locked(struct lock_data *lock) {
 static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
   size_t path_len;
   struct lock_data *lock = NULL;
-  enum zklock_type lock_type;
+  int lock_type;
   VALUE class_name;
 
   if (argc < 2 || TYPE(argv[0]) != RUBY_T_STRING || RSTRING_LEN(argv[0]) == 0 || RSTRING_PTR(argv[0])[0] != '/') {
@@ -365,13 +388,13 @@ static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
     rb_raise(rb_eRuntimeError, "lock_initialize() called with class: %s", RSTRING_PTR(class_name));
 
   ZKL_CALLOC(lock, struct lock_data);
-  lock->type = lock_type;
+  lock->type = lock_type | ZKLOCK_MASTER;
   lock->ref_count = 1;
   path_len = RSTRING_LEN(argv[0]) + 16;
   ZKL_CALLOCB(lock->path, path_len, char *);
-  snprintf(lock->path, path_len, "%s/%s-", RSTRING_PTR(argv[0]), lock_type == ZKLOCK_SHARED ? "read" : "write");
-  pthread_mutex_init(&lock->mutex, NULL);
-  pthread_cond_init(&lock->cond, NULL);
+  snprintf(lock->path, path_len, "%s/%s-", RSTRING_PTR(argv[0]), lock_type & ZKLOCK_SHARED ? "read" : "write");
+  pthread_mutex_init(get_lock_mutex(lock), NULL);
+  pthread_cond_init(get_lock_cond(lock), NULL);
   Data_Get_Struct(argv[1], struct connection_data, lock->conn);
   lock->state = ZKLOCK_STATE_UNLOCKED;
   rb_iv_set(self, kLockIvarData, Data_Wrap_Struct(rb_cObject, NULL, lock_data_free, lock));
@@ -432,12 +455,12 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
   zkl_connection_incr_locks(conn);
   zkl_lock_send_command(ZKLCMD_LOCK, lock);
 
-  pthread_mutex_lock(&lock->mutex);
+  pthread_mutex_lock(get_lock_mutex(lock));
   while (lock->state != ZKLOCK_STATE_LOCKED && lock->state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
-    int ret = zkl_wait_for_notification(&lock->mutex, &lock->cond, &ts);
+    int ret = zkl_wait_for_notification(get_lock_mutex(lock), get_lock_cond(lock), &ts);
     state = lock->state;
     if (ret == ETIMEDOUT && state != ZKLOCK_STATE_LOCKED && state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
-      pthread_mutex_unlock(&lock->mutex);
+      pthread_mutex_unlock(get_lock_mutex(lock));
 
       zkl_cleanup_lock_node(lock);
 
@@ -447,9 +470,9 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
         rb_raise(zklock_timeout_error_, "lock acquire timed out");
     }
   }
-  pthread_mutex_unlock(&lock->mutex);
+  pthread_mutex_unlock(get_lock_mutex(lock));
 
-  if (state != ZKLOCK_STATE_LOCKED && state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
+  if (state != ZKLOCK_STATE_LOCKED) {
     zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
   }
 
@@ -478,18 +501,18 @@ static VALUE lock_unlock(int argc, VALUE *argv, VALUE self) {
   zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
 
   if (timeout != 0) {
-    pthread_mutex_lock(&lock->mutex);
+    pthread_mutex_lock(get_lock_mutex(lock));
     while (lock->state != ZKLOCK_STATE_UNLOCKED) {
-      int ret = zkl_wait_for_notification(&lock->mutex, &lock->cond, &ts);
+      int ret = zkl_wait_for_notification(get_lock_mutex(lock), get_lock_cond(lock), &ts);
       if (ret == ETIMEDOUT && lock->state != ZKLOCK_STATE_UNLOCKED) {
-        pthread_mutex_unlock(&lock->mutex);
+        pthread_mutex_unlock(get_lock_mutex(lock));
         if (lock->state == ZKLOCK_STATE_ERROR)
           rb_raise(zklock_exception_, "error unlocking lock");
         else
           rb_raise(zklock_timeout_error_, "lock unlock timed out");
       }
     }
-    pthread_mutex_unlock(&lock->mutex);
+    pthread_mutex_unlock(get_lock_mutex(lock));
   }
 
   return Qtrue;
