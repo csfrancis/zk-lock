@@ -190,17 +190,6 @@ class ZKLock::LockTest < Test::Unit::TestCase
     refute in_exclusive_lock
   end
 
-  def test_connection_close_raises_with_locked_lock
-    c = ZKLock::Connection.new(@server)
-    s = ZKLock::SharedLock.new(@path, c)
-    assert s.lock(:blocking => true)
-    assert_raise ZKLock::Exception do
-      c.close
-    end
-    s.unlock(:timeout => -1)
-    c.close
-  end
-
   def test_with_lock_yields
     yielded = false
     l = ZKLock::SharedLock.new(@path, @c)

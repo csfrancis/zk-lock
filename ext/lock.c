@@ -18,6 +18,8 @@ static const char * kLockIvarConnection = "@_connection";
   Data_Get_Struct(rb_iv_get(self, kLockIvarConnection), struct connection_data, conn);
 #define ZKL_LOCKERROR(rc) handle_lock_error(rc, lock); break;
 
+static void zkl_lock_incr_ref(struct lock_data *lock);
+static void zkl_lock_decr_ref(struct lock_data *lock);
 static void cb_zk_get_children(int rc, const struct String_vector *strings, const void *data);
 
 static inline int64_t get_lock_sequence(const char *path) {
@@ -32,6 +34,7 @@ static void zkl_lock_send_command(enum zklock_command_type cmd_type, struct lock
   struct zklock_command cmd;
   cmd.cmd = cmd_type;
   cmd.x.lock = lock;
+  zkl_lock_incr_ref(lock);
   zkl_connection_send_command(lock->conn, &cmd);
 }
 
@@ -267,6 +270,9 @@ static void zkl_cleanup_lock_node(struct lock_data *lock) {
       handle_lock_error(ret, lock);
       return;
     }
+  } else if (lock->state > ZKLOCK_STATE_UNLOCKED) {
+    lock->state = ZKLOCK_STATE_UNLOCKED;
+    zkl_connection_decr_locks(lock->conn);
   }
 }
 
@@ -281,28 +287,49 @@ void zkl_lock_process_lock_command(struct zklock_command *cmd) {
     if (ret != ZOK) {
       handle_lock_error(ret, lock);
     }
-    return;
   }
+  zkl_lock_decr_ref(lock);
 }
 
 void zkl_lock_process_unlock_command(struct zklock_command *cmd) {
   struct lock_data *lock = cmd->x.lock;
   zkl_cleanup_lock_node(lock);
+  zkl_lock_decr_ref(lock);
+}
+
+static void zkl_lock_incr_ref(struct lock_data *lock) {
+  pthread_mutex_lock(&lock->mutex);
+  lock->ref_count++;
+  pthread_mutex_unlock(&lock->mutex);
+}
+
+static void zkl_lock_decr_ref(struct lock_data *lock) {
+  int delete = 0;
+  pthread_mutex_lock(&lock->mutex);
+  if (--lock->ref_count == 0) {
+    delete = 1;
+  }
+  pthread_mutex_unlock(&lock->mutex);
+
+  if (delete) {
+    ZKL_DEBUG("freeing lock: %p", lock);
+    free(lock->path);
+    if (lock->create_path) free(lock->create_path);
+    if (lock->state > ZKLOCK_STATE_UNLOCKED && lock->state != ZKLOCK_STATE_UNLOCKING) {
+      ZKL_LOG("lock %p (%s) in state %d is being gc'd before being unlocked!", lock,
+        lock->path, lock->state);
+      zkl_connection_decr_locks(lock->conn);
+    }
+    pthread_cond_destroy(&lock->cond);
+    pthread_mutex_destroy(&lock->mutex);
+    free(lock);
+  }
 }
 
 static void lock_data_free(void *p) {
   struct lock_data *lock = (struct lock_data *) p;
-  ZKL_DEBUG("freeing lock: %p", p);
-  free(lock->path);
-  if (lock->create_path) free(lock->create_path);
-  if (lock->state > ZKLOCK_STATE_UNLOCKED && lock->state != ZKLOCK_STATE_UNLOCKING) {
-    ZKL_LOG("lock %p (%s) in state %d is being gc'd before being unlocked!", lock,
-      lock->path, lock->state);
-    zkl_connection_decr_locks(lock->conn);
-  }
-  pthread_cond_destroy(&lock->cond);
-  pthread_mutex_destroy(&lock->mutex);
-  free(lock);
+  ZKL_DEBUG("gc free lock: %p", p);
+  zkl_lock_decr_ref(lock);
 }
 
 static int zkl_lock_unlocked(struct lock_data *lock) {
@@ -339,6 +366,7 @@ static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
 
   ZKL_CALLOC(lock, struct lock_data);
   lock->type = lock_type;
+  lock->ref_count = 1;
   path_len = RSTRING_LEN(argv[0]) + 16;
   ZKL_CALLOCB(lock->path, path_len, char *);
   snprintf(lock->path, path_len, "%s/%s-", RSTRING_PTR(argv[0]), lock_type == ZKLOCK_SHARED ? "read" : "write");
@@ -421,7 +449,7 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
   }
   pthread_mutex_unlock(&lock->mutex);
 
-  if (state != ZKLOCK_STATE_LOCKED) {
+  if (state != ZKLOCK_STATE_LOCKED && state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
     zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
   }
 

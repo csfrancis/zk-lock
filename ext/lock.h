@@ -25,6 +25,7 @@ enum zklock_state {
 
 struct lock_data {
   enum zklock_type type;
+  int ref_count;
   char *path;
   char *create_path;
   int64_t seq;

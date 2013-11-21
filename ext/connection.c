@@ -338,10 +338,6 @@ static VALUE connection_close(int argc, VALUE *argv, VALUE self) {
     rb_raise(zklock_exception_, "connection is not connected");
   }
 
-  if (conn->ref_count > 1) {
-    ZKL_LOG("WARNING: connection has outstanding locked locks");
-  }
-
   zkl_send_terminate(conn);
 
   return self;
