@@ -10,6 +10,10 @@ class ZKLock::LockTest < Test::Unit::TestCase
     @c = ZKLock::Connection.new(@server)
   end
 
+  def teardown
+    @c.close if @c.connected?
+  end
+
   def test_create_lock_fails_with_no_argument
     assert_raise ArgumentError do
       ZKLock::SharedLock.new
@@ -205,5 +209,48 @@ class ZKLock::LockTest < Test::Unit::TestCase
     assert_raise ArgumentError do
       l.with_lock
     end
+  end
+
+  def test_create_multi_shared_lock
+    path1 = "/zklock/multi_lock/lock1"
+    path2 = "/zklock/multi_lock/lock2"
+    l = ZKLock::SharedLock.new([path1, path2], @c)
+    s = l.lock
+    assert s.values.all?
+    assert_equal 2, s.length
+    assert l.locked?.values.all?
+    assert l.unlock :timeout => -1
+  end
+
+  def test_create_multi_shared_lock_with_one_exclusive_locked
+    path1 = "/zklock/multi_lock/lock1"
+    path2 = "/zklock/multi_lock/lock2"
+
+    mon = Monitor.new
+    cond = mon.new_cond
+    in_exclusive_lock = false
+
+    Thread.new do
+      e = ZKLock::ExclusiveLock.new(path1, @c)
+      e.lock(:blocking => true)
+      in_exclusive_lock = true
+      mon.synchronize do
+        cond.signal
+      end
+      sleep(SLEEP_TIMEOUT)
+      e.unlock
+    end
+
+    mon.synchronize do
+      cond.wait
+    end
+
+    assert in_exclusive_lock
+    s = ZKLock::SharedLock.new([path1, path2], @c)
+    results = s.lock
+    assert_equal 2, results.length
+    refute results[path1]
+    assert results[path2]
+    s.unlock :timeout => -1
   end
 end

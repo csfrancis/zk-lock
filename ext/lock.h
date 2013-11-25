@@ -6,11 +6,6 @@
 #include "zklock.h"
 #include "connection.h"
 
-enum zklock_type {
-  ZKLOCK_SHARED = 0,
-  ZKLOCK_EXCLUSIVE
-};
-
 enum zklock_state {
   ZKLOCK_STATE_ERROR = -1,
   ZKLOCK_STATE_UNLOCKED,
@@ -24,17 +19,28 @@ enum zklock_state {
 };
 
 struct lock_data {
-  enum zklock_type type;
+  int type;
   int ref_count;
+  enum zklock_state state;
   char *path;
   char *create_path;
   int64_t seq;
   int should_block;
   struct connection_data *conn;
-  enum zklock_state state;
   int err;
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
+  union {
+    struct {
+      long num_slaves;
+      struct lock_data *slaves;
+      pthread_mutex_t mutex;
+      pthread_cond_t cond;
+    } master;
+    struct {
+      struct lock_data *master;
+      pthread_mutex_t *mutex;
+      pthread_cond_t *cond;
+    } slave;
+  };
 };
 
 void zkl_lock_process_lock_command(struct zklock_command *cmd);

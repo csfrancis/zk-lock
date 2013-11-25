@@ -81,7 +81,7 @@ static void zkl_connection_decr_ref(struct connection_data *conn) {
         zkl_send_terminate(conn);
       }
 
-      if (conn->thread_state != ZKLTHREAD_STOPPED) {
+      if (conn->thread_state != ZKLTHREAD_STOPPED && !exiting_) {
         struct timespec ts = { 0 };
         ZKL_DEBUG("waiting for worker thread to terminate...");
         pthread_mutex_lock(&conn->mutex);
@@ -95,13 +95,14 @@ static void zkl_connection_decr_ref(struct connection_data *conn) {
 
       close(conn->pipefd[0]);
       close(conn->pipefd[1]);
+      conn->pipefd[0] = conn->pipefd[1] = -1;
       pthread_cond_destroy(&conn->cond);
       pthread_mutex_destroy(&conn->mutex);
-      free(conn->server);
+      ZKL_FREE(conn->server);
       conn->initialized = 0;
     }
 
-    free(conn);
+    ZKL_FREE(conn);
   }
 }
 
