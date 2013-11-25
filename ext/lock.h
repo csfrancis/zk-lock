@@ -21,16 +21,16 @@ enum zklock_state {
 struct lock_data {
   int type;
   int ref_count;
+  enum zklock_state state;
   char *path;
   char *create_path;
   int64_t seq;
   int should_block;
   struct connection_data *conn;
-  enum zklock_state state;
   int err;
   union {
     struct {
-      int num_slaves;
+      long num_slaves;
       struct lock_data *slaves;
       pthread_mutex_t mutex;
       pthread_cond_t cond;

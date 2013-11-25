@@ -12,9 +12,9 @@
 static const char * kLockIvarData = "@_lock_data";
 static const char * kLockIvarConnection = "@_connection";
 
-#define ZKLOCK_SHARED     1
-#define ZKLOCK_EXCLUSIVE  2
-#define ZKLOCK_MASTER     4
+#define ZKLOCK_SHARED     0x1
+#define ZKLOCK_EXCLUSIVE  0x2
+#define ZKLOCK_MASTER     0x4
 
 #define ZKL_GETLOCK() struct lock_data *lock; \
   Data_Get_Struct(rb_iv_get(self, kLockIvarData), struct lock_data, lock);
@@ -327,7 +327,7 @@ static void zkl_lock_decr_ref(struct lock_data *lock) {
   pthread_mutex_unlock(get_lock_mutex(lock));
 
   if (delete) {
-    ZKL_DEBUG("freeing lock: %p", lock);
+    ZKL_DEBUG("freeing lock: %p (%s)", lock, lock->type & ZKLOCK_MASTER ? "master" : "slave");
 
     if (lock->state > ZKLOCK_STATE_UNLOCKED && lock->state != ZKLOCK_STATE_UNLOCKING) {
       ZKL_LOG("lock %p \"%s\" in state %d is being gc'd before being unlocked!", lock,
@@ -335,17 +335,34 @@ static void zkl_lock_decr_ref(struct lock_data *lock) {
       zkl_connection_decr_locks(lock->conn);
     }
 
-    ZKL_FREE(lock->path);
+    if (lock->path) {
+      ZKL_FREE(lock->path);
+    }
+
     if (lock->create_path) {
       ZKL_FREE(lock->create_path);
     }
 
     if (lock->type & ZKLOCK_MASTER) {
+      ZKL_DEBUG("lock %p has %d slave locks", lock, lock->master.num_slaves);
+
+      long i;
+      for (i = 0; i < lock->master.num_slaves; ++i) {
+        zkl_lock_decr_ref(&lock->master.slaves[i]);
+      }
+      if (lock->master.slaves) {
+        ZKL_FREE(lock->master.slaves)
+      }
+
       pthread_cond_destroy(get_lock_cond(lock));
       pthread_mutex_destroy(get_lock_mutex(lock));
-    }
 
-    ZKL_FREE(lock);
+      ZKL_FREE(lock);
+    } else {
+      lock->slave.master = NULL;
+      lock->slave.mutex = NULL;
+      lock->slave.cond = NULL;
+    }
   }
 }
 
@@ -363,14 +380,34 @@ static int zkl_lock_locked(struct lock_data *lock) {
   return lock->state == ZKLOCK_STATE_LOCKED;
 }
 
+static char * create_lock_path(VALUE path, int lock_type) {
+  char *lock_path;
+  size_t path_len = RSTRING_LEN(path) + 16;
+  ZKL_CALLOCB(lock_path, path_len, char *);
+  snprintf(lock_path, path_len, "%s/%s-", RSTRING_PTR(path), lock_type & ZKLOCK_SHARED ? "read" : "write");
+  return lock_path;
+}
+
 static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
   size_t path_len;
   struct lock_data *lock = NULL;
   int lock_type;
-  VALUE class_name;
+  long i;
+  VALUE class_name, path;
 
-  if (argc < 2 || TYPE(argv[0]) != RUBY_T_STRING || RSTRING_LEN(argv[0]) == 0 || RSTRING_PTR(argv[0])[0] != '/') {
+  if (argc < 2 || (TYPE(argv[0]) != RUBY_T_STRING && TYPE(argv[0]) != RUBY_T_ARRAY)) {
     rb_raise(rb_eArgError, "lock must be initialized with a valid zookeeper path and connection");
+  }
+
+  if (TYPE(argv[0]) == RUBY_T_STRING && (RSTRING_LEN(argv[0]) == 0 || RSTRING_PTR(argv[0])[0] != '/')) {
+    rb_raise(rb_eArgError, "lock must be initialized with a valid zookeeper path and connection");
+  } else if (TYPE(argv[0]) == RUBY_T_ARRAY) {
+    for (i = 0; i < RARRAY_LEN(argv[0]); ++i) {
+      path = rb_ary_entry(argv[0], i);
+      if (TYPE(path) != RUBY_T_STRING || RSTRING_LEN(path) == 0 || RSTRING_PTR(path)[0] != '/') {
+        rb_raise(rb_eArgError, "lock must be initialized with a valid zookeeper path and connection");
+      }
+    }
   }
 
   if (TYPE(argv[1]) != RUBY_T_DATA
@@ -390,23 +427,147 @@ static VALUE lock_initialize(int argc, VALUE *argv, VALUE self) {
   ZKL_CALLOC(lock, struct lock_data);
   lock->type = lock_type | ZKLOCK_MASTER;
   lock->ref_count = 1;
-  path_len = RSTRING_LEN(argv[0]) + 16;
-  ZKL_CALLOCB(lock->path, path_len, char *);
-  snprintf(lock->path, path_len, "%s/%s-", RSTRING_PTR(argv[0]), lock_type & ZKLOCK_SHARED ? "read" : "write");
+  lock->state = ZKLOCK_STATE_UNLOCKED;
+  Data_Get_Struct(argv[1], struct connection_data, lock->conn);
   pthread_mutex_init(get_lock_mutex(lock), NULL);
   pthread_cond_init(get_lock_cond(lock), NULL);
-  Data_Get_Struct(argv[1], struct connection_data, lock->conn);
-  lock->state = ZKLOCK_STATE_UNLOCKED;
+  if (TYPE(argv[0]) == RUBY_T_STRING || RARRAY_LEN(argv[0]) == 1) {
+    lock->path = create_lock_path(TYPE(argv[0]) == RUBY_T_STRING ? argv[0] : rb_ary_entry(argv[0], 0), lock->type);
+  } else {
+    lock->master.num_slaves = RARRAY_LEN(argv[0]);
+    ZKL_DEBUG("creating multi-lock with %d slaves", lock->master.num_slaves);
+    ZKL_CALLOCB(lock->master.slaves, sizeof(struct lock_data) * lock->master.num_slaves, struct lock_data *);
+    for (i = 0; i < lock->master.num_slaves; ++i) {
+      struct lock_data *slave_lock = &lock->master.slaves[i];
+      path = rb_ary_entry(argv[0], i);
+      slave_lock->type = lock_type;
+      slave_lock->ref_count = 1;
+      slave_lock->state = ZKLOCK_STATE_UNLOCKED;
+      slave_lock->path = create_lock_path(path, lock_type);
+      slave_lock->conn = lock->conn;
+      slave_lock->slave.master = lock;
+      slave_lock->slave.mutex = get_lock_mutex(lock);
+      slave_lock->slave.cond = get_lock_cond(lock);
+    }
+  }
+
   rb_iv_set(self, kLockIvarData, Data_Wrap_Struct(rb_cObject, NULL, lock_data_free, lock));
   rb_iv_set(self, kLockIvarConnection, argv[1]);
 
   return self;
 }
 
+static void zkl_ensure_connected(struct connection_data *conn, struct timespec *ts) {
+  if (!zkl_connection_valid(conn)) {
+    zkl_connection_connect(conn);
+  }
+
+  if (!zkl_connection_connected(conn)) {
+    pthread_mutex_lock(&conn->mutex);
+    if (!zkl_connection_connected(conn)) {
+      do {
+        int ret = zkl_wait_for_connection(conn, ts);
+        if (ret == ETIMEDOUT && !zkl_connection_connected(conn)) {
+          pthread_mutex_unlock(&conn->mutex);
+          rb_raise(zklock_timeout_error_, "connect timed out");
+        }
+      } while (zkl_connection_valid(conn) && !zkl_connection_connected(conn));
+
+      if (!zkl_connection_valid(conn)) {
+        pthread_mutex_unlock(&conn->mutex);
+        rb_raise(zklock_exception_, "unable to connect to server");
+      }
+    }
+    pthread_mutex_unlock(&conn->mutex);
+  }
+}
+
+static enum zklock_state zkl_wait_for_lock(struct lock_data *lock, struct timespec *ts) {
+  enum zklock_state state;
+  pthread_mutex_lock(get_lock_mutex(lock));
+  while (lock->state != ZKLOCK_STATE_LOCKED && lock->state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
+    int ret = zkl_wait_for_notification(get_lock_mutex(lock), get_lock_cond(lock), ts);
+    if (lock->master.num_slaves) {
+      int ready = 1;
+      long i;
+
+      /* rollup the current state of all slave locks */
+      for (i = 0; i < lock->master.num_slaves; ++i) {
+        struct lock_data *slave_lock = &lock->master.slaves[i];
+        if (slave_lock->state != ZKLOCK_STATE_LOCKED && slave_lock->state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
+          ready = 0;
+          break;
+        }
+      }
+
+      if (ret == ETIMEDOUT && !ready) {
+        pthread_mutex_unlock(get_lock_mutex(lock));
+        for (i = 0; i < lock->master.num_slaves; ++i) {
+          zkl_cleanup_lock_node(&lock->master.slaves[i]);
+        }
+        rb_raise(zklock_timeout_error_, "lock acquire timed out");
+      }
+
+      if (ready) break;
+    } else {
+      state = lock->state;
+      if (ret == ETIMEDOUT && state != ZKLOCK_STATE_LOCKED && state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
+        pthread_mutex_unlock(get_lock_mutex(lock));
+
+        zkl_cleanup_lock_node(lock);
+
+        if (state == ZKLOCK_STATE_ERROR)
+          rb_raise(zklock_exception_, "error acquiring lock");
+        else
+          rb_raise(zklock_timeout_error_, "lock acquire timed out");
+      }
+    }
+  }
+  pthread_mutex_unlock(get_lock_mutex(lock));
+  return state;
+}
+
+static void zkl_lock_lock_data(struct lock_data *lock, int blocking) {
+  lock->state = ZKLOCK_STATE_CREATE_NODE;
+  lock->should_block = blocking;
+  zkl_connection_incr_locks(lock->conn);
+  zkl_lock_send_command(ZKLCMD_LOCK, lock);
+}
+
+static void zkl_unlock_lock_data(struct lock_data *lock) {
+  lock->state = ZKLOCK_STATE_UNLOCKING;
+  zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
+}
+
+static VALUE build_multi_lock_result(struct lock_data *lock, void (*slave_cb)(struct lock_data *)) {
+  long i;
+  VALUE ret = rb_hash_new();
+  for (i = 0; i < lock->master.num_slaves; ++i) {
+    VALUE key;
+    struct lock_data *slave_lock = &lock->master.slaves[i];
+    char *p = strrchr(slave_lock->path, '/');
+    *p = '\0';
+    key = rb_str_new2(slave_lock->path);
+    *p = '/';
+    rb_hash_aset(ret, key, zkl_lock_locked(slave_lock) ? Qtrue : Qfalse);
+    if (slave_cb) {
+      (*slave_cb)(slave_lock);
+    }
+  }
+  return ret;
+}
+
+static void unlock_if_not_locked(struct lock_data *lock) {
+  if (lock->state != ZKLOCK_STATE_LOCKED) {
+    zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
+  }
+}
+
 static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
   struct timespec ts = { 0 };
   enum zklock_state state;
   int blocking = 0;
+  VALUE ret = Qnil;
   ZKL_GETLOCK();
   ZKL_GETLOCKCONNECTION();
 
@@ -427,89 +588,104 @@ static VALUE lock_lock(int argc, VALUE *argv, VALUE self) {
     }
   }
 
-  if (!zkl_connection_valid(conn)) {
-    zkl_connection_connect(conn);
-  }
+  zkl_ensure_connected(conn, &ts);
 
-  if (!zkl_connection_connected(conn)) {
-    pthread_mutex_lock(&conn->mutex);
-    if (!zkl_connection_connected(conn)) {
-      do {
-        int ret = zkl_wait_for_connection(conn, &ts);
-        if (ret == ETIMEDOUT && !zkl_connection_connected(conn)) {
-          pthread_mutex_unlock(&conn->mutex);
-          rb_raise(zklock_timeout_error_, "connect timed out");
-        }
-      } while (zkl_connection_valid(conn) && !zkl_connection_connected(conn));
+  if (lock->master.num_slaves) {
+    long i;
 
-      if (!zkl_connection_valid(conn)) {
-        pthread_mutex_unlock(&conn->mutex);
-        rb_raise(zklock_exception_, "unable to connect to server");
-      }
+    for (i = 0; i < lock->master.num_slaves; ++i) {
+      struct lock_data *slave_lock = &lock->master.slaves[i];
+      zkl_lock_lock_data(slave_lock, blocking);
     }
-    pthread_mutex_unlock(&conn->mutex);
+
+    zkl_wait_for_lock(lock, &ts);
+
+    ret = build_multi_lock_result(lock, unlock_if_not_locked);
+  } else {
+    zkl_lock_lock_data(lock, blocking);
+
+    state = zkl_wait_for_lock(lock, &ts);
+
+    unlock_if_not_locked(lock);
+    ret = state == ZKLOCK_STATE_LOCKED ? Qtrue : Qfalse;
   }
 
-  lock->state = ZKLOCK_STATE_CREATE_NODE;
-  lock->should_block = blocking;
-  zkl_connection_incr_locks(conn);
-  zkl_lock_send_command(ZKLCMD_LOCK, lock);
-
-  pthread_mutex_lock(get_lock_mutex(lock));
-  while (lock->state != ZKLOCK_STATE_LOCKED && lock->state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
-    int ret = zkl_wait_for_notification(get_lock_mutex(lock), get_lock_cond(lock), &ts);
-    state = lock->state;
-    if (ret == ETIMEDOUT && state != ZKLOCK_STATE_LOCKED && state != ZKLOCK_STATE_LOCK_WOULD_BLOCK) {
-      pthread_mutex_unlock(get_lock_mutex(lock));
-
-      zkl_cleanup_lock_node(lock);
-
-      if (state == ZKLOCK_STATE_ERROR)
-        rb_raise(zklock_exception_, "error acquiring lock");
-      else
-        rb_raise(zklock_timeout_error_, "lock acquire timed out");
-    }
-  }
-  pthread_mutex_unlock(get_lock_mutex(lock));
-
-  if (state != ZKLOCK_STATE_LOCKED) {
-    zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
-  }
-
-  return state == ZKLOCK_STATE_LOCKED ? Qtrue : Qfalse;
+  return ret;
 }
 
 static VALUE lock_locked(VALUE self) {
   ZKL_GETLOCK();
+  if (lock->master.num_slaves) {
+    return build_multi_lock_result(lock, NULL);
+  }
   return zkl_lock_locked(lock) ? Qtrue : Qfalse;
 }
 
 static VALUE lock_unlock(int argc, VALUE *argv, VALUE self) {
+  long i;
   int64_t timeout = 0;
   struct timespec ts = { 0 };
   ZKL_GETLOCK();
 
-  if (lock->state != ZKLOCK_STATE_LOCKED) {
+  if (!lock->master.num_slaves && lock->state != ZKLOCK_STATE_LOCKED) {
     return Qfalse;
+  } else if (lock->master.num_slaves) {
+    int has_locked_slaves = 0;
+    for (i = 0; i < lock->master.num_slaves; ++i) {
+      struct lock_data *slave_lock = &lock->master.slaves[i];
+      if (slave_lock->state == ZKLOCK_STATE_LOCKED) {
+        has_locked_slaves = 1;
+        break;
+      }
+    }
+    if (!has_locked_slaves) return Qfalse;
   }
 
   if (argc == 1 && TYPE(argv[0]) == T_HASH) {
     timeout = get_timeout_from_hash(argv[0], 1, &ts);
   }
 
-  lock->state = ZKLOCK_STATE_UNLOCKING;
-  zkl_lock_send_command(ZKLCMD_UNLOCK, lock);
+  if (!lock->master.num_slaves) {
+    zkl_unlock_lock_data(lock);
+  } else {
+    for (i = 0; i < lock->master.num_slaves; ++i) {
+      struct lock_data *slave_lock = &lock->master.slaves[i];
+      if (slave_lock->state == ZKLOCK_STATE_LOCKED) {
+        zkl_unlock_lock_data(slave_lock);
+      }
+    }
+  }
 
   if (timeout != 0) {
     pthread_mutex_lock(get_lock_mutex(lock));
     while (lock->state != ZKLOCK_STATE_UNLOCKED) {
       int ret = zkl_wait_for_notification(get_lock_mutex(lock), get_lock_cond(lock), &ts);
-      if (ret == ETIMEDOUT && lock->state != ZKLOCK_STATE_UNLOCKED) {
-        pthread_mutex_unlock(get_lock_mutex(lock));
-        if (lock->state == ZKLOCK_STATE_ERROR)
-          rb_raise(zklock_exception_, "error unlocking lock");
-        else
+      if (!lock->master.num_slaves) {
+        if (ret == ETIMEDOUT && lock->state != ZKLOCK_STATE_UNLOCKED) {
+          pthread_mutex_unlock(get_lock_mutex(lock));
+          if (lock->state == ZKLOCK_STATE_ERROR)
+            rb_raise(zklock_exception_, "error unlocking lock");
+          else
+            rb_raise(zklock_timeout_error_, "lock unlock timed out");
+        }
+      } else {
+        int ready = 1;
+
+        /* rollup the current state of all slave locks */
+        for (i = 0; i < lock->master.num_slaves; ++i) {
+          struct lock_data *slave_lock = &lock->master.slaves[i];
+          if (slave_lock->state != ZKLOCK_STATE_UNLOCKED) {
+            ready = 0;
+            break;
+          }
+        }
+
+        if (ret == ETIMEDOUT && !ready) {
+          pthread_mutex_unlock(get_lock_mutex(lock));
           rb_raise(zklock_timeout_error_, "lock unlock timed out");
+        }
+
+        if (ready) break;
       }
     }
     pthread_mutex_unlock(get_lock_mutex(lock));
