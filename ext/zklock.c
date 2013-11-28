@@ -20,6 +20,19 @@ struct notification_data {
   struct timespec ts;
 };
 
+#ifdef __MACH__ /* no clock_gettime() on OSX */
+int clock_gettime(int clk_id, struct timespec *ts) {
+  clock_serv_t cclock;
+  mach_timespec_t mts;
+  host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+  clock_get_time(cclock, &mts);
+  mach_port_deallocate(mach_task_self(), cclock);
+  ts->tv_sec = mts.tv_sec;
+  ts->tv_nsec = mts.tv_nsec;
+  return 0;
+}
+#endif
+
 int64_t get_timeout_from_hash(VALUE hash, int allow_zero, struct timespec *ts) {
   int64_t timeout = -1;
   VALUE timeout_ref = rb_hash_aref(hash, ID2SYM(rb_intern("timeout")));

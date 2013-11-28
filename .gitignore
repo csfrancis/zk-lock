@@ -2,6 +2,7 @@
 *.gem
 *.o
 *.so
+*.bundle
 *~
 *.log
 Makefile

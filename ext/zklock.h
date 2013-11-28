@@ -66,4 +66,12 @@ static inline void timespec_add_ns(struct timespec *a, uint64_t ns)
   a->tv_nsec = ns;
 }
 
+#ifdef __MACH__ /* no clock_gettime() on OSX */
+#include <mach/clock.h>
+#include <mach/mach.h>
+
+#define CLOCK_REALTIME 1
+int clock_gettime(int clk_id, struct timespec *ts);
+#endif
+
 #endif /* __ZKLOCK_H__ */
