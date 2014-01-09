@@ -100,6 +100,6 @@ Indicates if the lock is currently locked. Returns true or false for a single lo
 
 ## Todo ##
 
-[ ] Multiplex connections across a single worker thread.
+- [ ] Multiplex connections across a single worker thread.
 
-[ ] Better exceptions.
+- [ ] Better exceptions.
